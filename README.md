@@ -6,15 +6,24 @@ Works on Windows, macOS and Linux with Node 20 or later. Everything that differs
 
 ## Install
 
-From a checkout (any OS):
+```sh
+npm install -g ccnav    # the -g matters
+ccnav --install-shell   # optional: leave your shell in the session's directory afterwards
+```
+
+Without `-g`, npm treats the current folder as a project and puts the command in
+`./node_modules/.bin`, which is not on PATH — the install succeeds and `ccnav` still
+reports `command not found`. If that happens after a `-g` install, npm's global bin
+folder is missing from PATH; `npm prefix -g` prints the folder whose `bin` belongs there.
+
+From a checkout instead:
 
 ```sh
 npm install
 npm link                # puts `ccnav` on PATH
-ccnav --install-shell   # optional: leave your shell in the session's directory afterwards
 ```
 
-Or build a tarball once and install it anywhere, e.g. on a Mac:
+Or build a tarball once and install it anywhere:
 
 ```sh
 npm pack                        # -> ccnav-1.0.0.tgz
@@ -23,7 +32,21 @@ npm install -g ./ccnav-1.0.0.tgz
 
 `--install-shell` writes a function to the right file for your shell: the PowerShell `$PROFILE` on Windows, `~/.zshrc` for zsh (macOS default), `~/.bash_profile` (macOS) or `~/.bashrc` (Linux) for bash, and `~/.config/fish/functions/ccnav.fish` for fish. Running it again replaces the block rather than adding a second one.
 
-New tabs (`t`) use Windows Terminal, iTerm2, WezTerm, kitty, GNOME Terminal or Konsole. Terminal.app gets a new window, because real tabs need Accessibility permission.
+New tabs (`t`) use Windows Terminal, iTerm2, WezTerm, kitty, GNOME Terminal or Konsole. Terminal.app gets a new window, because real tabs need Accessibility permission. On macOS the first new tab asks for permission to control the terminal; if it is refused, allow it again under System Settings → Privacy & Security → Automation.
+
+## Agents
+
+Sessions are listed whether or not the agent that wrote them is still installed, so an
+old machine's transcripts stay visible. Resuming one whose agent is missing offers to
+install it:
+
+```
+codex is not installed. Install it now with "npm install -g @openai/codex"? (y/N)
+```
+
+Answer `y` and ccnav runs that install, then launches the agent so you can sign in and
+finish its own setup. Answer `n` and nothing is installed. `claude` maps to
+`@anthropic-ai/claude-code` and `codex` to `@openai/codex`.
 
 ## Use
 
@@ -34,7 +57,38 @@ ccnav --codex          only Codex sessions
 ccnav --list           print sessions and exit
 ccnav --json           print sessions as JSON and exit
 ccnav --model opus     any other arguments are passed to the agent
+ccnav here             new session in the current directory, running unattended
+ccnav here --codex     the same, without being asked which agent
 ```
+
+## Start one here
+
+`ccnav here` ignores the session list entirely. It asks which agent, then starts a
+**new** session in the current directory with that agent's permission prompts turned
+off, so it runs unattended:
+
+```
+New session in /Users/you/project
+
+  1) ◆ claude  claude --dangerously-skip-permissions
+  2) ● codex   codex --dangerously-bypass-approvals-and-sandbox
+
+Which agent? [1]
+```
+
+Pressing enter takes the first agent; `1`/`2` or a name (`codex`, `cl`) picks one.
+`ccnav here --claude` or `--codex` skips the question, and any other arguments go to
+the agent (`ccnav here --claude --model opus`). The exact command is printed before it
+runs, and ctrl-D at the prompt starts nothing.
+
+What those flags mean is worth being clear about. Claude's
+`--dangerously-skip-permissions` bypasses every permission check. Codex's
+`--dangerously-bypass-approvals-and-sandbox` skips approvals *and* runs without a
+sandbox — its own help calls it EXTREMELY DANGEROUS and intends it for environments
+that are already sandboxed. Neither confines the agent to the directory you started in.
+Codex removed `--full-auto` in 0.156, so the sandboxed middle ground is now spelled
+`--ask-for-approval never --sandbox workspace-write` if you would rather edit
+`src/providers/codex.mjs` to use that instead.
 
 | Key | Action |
 |---|---|

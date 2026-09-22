@@ -8,6 +8,9 @@ export const agent = 'codex';
 export const command = 'codex';
 export const glyph = '●';
 export const color = 'green';
+// `ccnav here`: codex removed --full-auto in 0.156, so the policy is named directly.
+// This is the counterpart to Claude's --dangerously-skip-permissions: no approvals, no sandbox.
+export const AUTO_ARGS = ['--dangerously-bypass-approvals-and-sandbox'];
 
 export const HOME_DIR = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 export const SESSIONS_ROOT = path.join(HOME_DIR, 'sessions');

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { AGENTS, ago, humanSize, providerOf } from './sessions.mjs';
-import { archiveSession, copyToClipboard, isMaybeLive, openFolder, openInNewTab, searchTranscript } from './actions.mjs';
+import { archiveSession, copyToClipboard, hasCommand, isMaybeLive, openFolder, openInNewTab, searchTranscript } from './actions.mjs';
 
 const h = React.createElement;
 
@@ -212,6 +212,11 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
     else if (input === 't' && sel && requireDir()) {
       try {
         const p = providerOf(sel);
+        // A new tab has nowhere to report an install prompt, so send them to enter instead.
+        if (!hasCommand(p.command)) {
+          flash(`${p.command} is not installed — press enter to resume and ccnav will offer to install it.`, 'yellow');
+          return;
+        }
         const where = openInNewTab(p.command, sel.cwd, p.launchArgs('resume', sel, passthrough), oneLine(sel.title) || sel.id);
         flash(`Opened "${oneLine(sel.title) || sel.id}" in a new ${where}`);
       } catch (e) { flash(`Could not open a new tab: ${e.message}`, 'red'); }

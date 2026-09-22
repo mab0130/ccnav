@@ -2,8 +2,8 @@
 import React from 'react';
 import { render } from 'ink';
 import { App } from '../src/app.mjs';
-import { ago, humanSize, listSessions, providerOf, shortPath } from '../src/sessions.mjs';
-import { installShellFunction, launchAgent, reportCwd } from '../src/actions.mjs';
+import { AGENTS, PROVIDERS, ago, humanSize, listSessions, providerOf, shortPath } from '../src/sessions.mjs';
+import { askUser, ensureAgent, installShellFunction, launchAgent, reportCwd } from '../src/actions.mjs';
 
 const args = process.argv.slice(2);
 
@@ -17,11 +17,48 @@ usage:
   ccnav --codex          only Codex sessions
   ccnav --list           print sessions as a table and exit
   ccnav --json           print sessions as JSON and exit
+  ccnav here             skip the picker: start a NEW session in the current
+                         directory, running unattended with no permission prompts
+                         (ccnav here --claude / --codex picks the agent outright)
   ccnav --install-shell  add a shell function (PowerShell, zsh, bash or fish) so
                          your shell is left in the session's directory afterwards
 
 Any other arguments are passed to the agent (e.g. ccnav --model opus).`);
   process.exit(0);
+}
+
+// `ccnav here` never touches the session list: it starts a new one in this directory.
+async function chooseAgent() {
+  if (!process.stdin.isTTY) {
+    console.error('ccnav here needs an interactive terminal, or name the agent: ccnav here --claude');
+    process.exit(1);
+  }
+  console.log(`\nNew session in ${process.cwd()}\n`);
+  AGENTS.forEach((a, i) => {
+    const p = PROVIDERS[a];
+    console.log(`  ${i + 1}) ${p.glyph} ${a.padEnd(7)} ${p.command} ${p.AUTO_ARGS.join(' ')}`);
+  });
+  const answer = await askUser(`\nWhich agent? [1] `);
+  // EOF is not a choice: never start an unattended agent nobody actually asked for.
+  if (answer === null) { console.error('\nNo answer given, nothing started.'); process.exit(1); }
+  if (!answer) return AGENTS[0];
+  const byNumber = AGENTS[Number(answer) - 1];
+  if (byNumber) return byNumber;
+  const byName = AGENTS.find(a => a.startsWith(answer.toLowerCase()));
+  if (byName) return byName;
+  console.error(`Not an agent: ${answer}`);
+  process.exit(1);
+}
+
+if (args[0] === 'here') {
+  const rest = args.slice(1);
+  const named = AGENTS.find(a => rest.includes(`--${a}`));
+  const extra = rest.filter(a => a !== '--' && !AGENTS.some(x => a === `--${x}`));
+  const provider = PROVIDERS[named || await chooseAgent()];
+  if (!await ensureAgent(provider.command)) process.exit(127);
+  const argv = [...provider.AUTO_ARGS, ...extra];
+  console.log(`\n\u2192 ${process.cwd()}\n\u2192 ${provider.command} ${argv.join(' ')}\n`);
+  process.exit(await launchAgent(provider.command, process.cwd(), argv));
 }
 
 if (args.includes('--install-shell')) {
@@ -63,6 +100,9 @@ const { action, session } = choice;
 
 const provider = providerOf(session);
 const agentArgs = provider.launchArgs(action, session, passthrough);
+
+// The agent may not be installed yet; offer to install it rather than just failing.
+if (!await ensureAgent(provider.command)) process.exit(127);
 
 reportCwd(session.cwd);
 console.log(`\n→ ${session.cwd}\n→ ${provider.command} ${agentArgs.join(' ')}\n`);

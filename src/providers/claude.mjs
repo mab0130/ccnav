@@ -8,6 +8,8 @@ export const agent = 'claude';
 export const command = 'claude';
 export const glyph = '◆';
 export const color = 'cyan';
+// `ccnav here`: a fresh session that never stops to ask for permission.
+export const AUTO_ARGS = ['--dangerously-skip-permissions'];
 
 export const HOME_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
 export const SESSIONS_ROOT = path.join(HOME_DIR, 'projects');

@@ -166,3 +166,49 @@ test('shell function install is idempotent', { skip: process.platform === 'win32
     for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : process.env[k] = v;
   }
 });
+
+test('an installed agent launches without prompting to install', async () => {
+  const { ensureAgent, hasCommand } = await import('../src/platform.mjs');
+  const self = path.basename(process.execPath); // node is on PATH while these tests run
+  assert.equal(hasCommand(self), true);
+  assert.equal(await ensureAgent(self), true);
+});
+
+test('a missing agent never prompts when there is no terminal to answer',
+  { skip: process.platform === 'win32' && 'builds a POSIX PATH' }, async () => {
+  const { ensureAgent, hasCommand, INSTALL_PKG } = await import('../src/platform.mjs');
+  const bin = path.join(root, 'stubbin');
+  fs.mkdirSync(bin, { recursive: true });
+  const saved = { path: process.env.PATH, tty: process.stdin.isTTY };
+  // A PATH with no agents on it, but still enough to resolve sh.
+  process.env.PATH = `${bin}:/usr/bin:/bin`;
+  try {
+    assert.equal(hasCommand('codex'), false);
+    // Piped output has nobody to answer, so it must decline rather than block forever.
+    process.stdin.isTTY = false;
+    assert.equal(await ensureAgent('codex'), false);
+    assert.equal(await ensureAgent('claude'), false);
+  } finally {
+    process.env.PATH = saved.path;
+    process.stdin.isTTY = saved.tty;
+  }
+  assert.deepEqual(Object.keys(INSTALL_PKG).sort(), ['claude', 'codex']);
+});
+
+test('`here` carries each agent\'s own unattended flag', async () => {
+  const claude = await import('../src/providers/claude.mjs');
+  const codex = await import('../src/providers/codex.mjs');
+  assert.deepEqual(claude.AUTO_ARGS, ['--dangerously-skip-permissions']);
+  // codex dropped --full-auto in 0.156: passing it now aborts with "unexpected argument".
+  assert.deepEqual(codex.AUTO_ARGS, ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.ok(!codex.AUTO_ARGS.includes('--full-auto'));
+});
+
+test('`ccnav here` starts nothing when there is no terminal and no named agent', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const bin = fileURLToPath(new URL('../bin/ccnav.mjs', import.meta.url));
+  const r = spawnSync(process.execPath, [bin, 'here'], { encoding: 'utf8', input: '' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /interactive terminal/);
+});

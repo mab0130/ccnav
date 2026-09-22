@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-export { copyToClipboard, installShellFunction, launchAgent, openFolder, openInNewTab } from './platform.mjs';
+export { askUser, copyToClipboard, ensureAgent, hasCommand, installShellFunction, launchAgent, openFolder, openInNewTab } from './platform.mjs';
 
 // Sessions touched this recently may be open in another terminal.
 export const LIVE_WINDOW_MS = 10 * 60 * 1000;
