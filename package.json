@@ -1,0 +1,36 @@
+{
+  "name": "ccnav",
+  "version": "1.0.0",
+  "description": "Claude Codex Navigator - pick a Claude Code or Codex session and resume it in its directory",
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "tui",
+    "cli",
+    "codex"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bin": {
+    "ccnav": "bin/ccnav.mjs"
+  },
+  "dependencies": {
+    "ink": "^7.1.1",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "ink-testing-library": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ]
+}
