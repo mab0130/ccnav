@@ -12,8 +12,8 @@
     "cli",
     "codex"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "rts-mb",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ccnav": "bin/ccnav.mjs"
@@ -31,6 +31,15 @@
   "files": [
     "bin",
     "src",
-    "README.md"
-  ]
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rts-mb/ccnav.git"
+  },
+  "homepage": "https://github.com/rts-mb/ccnav#readme",
+  "bugs": {
+    "url": "https://github.com/rts-mb/ccnav/issues"
+  }
 }
