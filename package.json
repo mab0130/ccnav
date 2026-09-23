@@ -1,6 +1,6 @@
 {
   "name": "ccnav",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Claude Codex Navigator - pick a Claude Code or Codex session and resume it in its directory",
   "scripts": {
     "test": "node --test"
