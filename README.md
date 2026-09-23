@@ -34,6 +34,8 @@ npm install -g ./ccnav-1.0.0.tgz
 
 New tabs (`t`) use Windows Terminal, iTerm2, WezTerm, kitty, GNOME Terminal or Konsole. Terminal.app gets a new window, because real tabs need Accessibility permission. On macOS the first new tab asks for permission to control the terminal; if it is refused, allow it again under System Settings → Privacy & Security → Automation.
 
+On Windows, PowerShell 7 preserves forwarded arguments including quotes and shell characters. With the built-in Windows PowerShell 5.1 fallback, arguments containing quotes, shell characters or line breaks are rejected because its npm command shim cannot pass them safely.
+
 ## Agents
 
 Sessions are listed whether or not the agent that wrote them is still installed, so an
@@ -120,7 +122,7 @@ Codex removed `--full-auto` in 0.156, so the sandboxed middle ground is now spel
 | Resume / fork | `claude --resume <id>` / `--fork-session` | `codex resume <id>` / `codex fork <id>` |
 | Hidden | subagent sidechain folders, Desktop scratch workspaces | subagent threads spawned by other sessions |
 
-Only the first and last 256 KB of each transcript are read when listing, so a 21 MB session costs the same as a small one. Full-text search reads whole files.
+Only the first and last 256 KB of each transcript are read when listing, so a 21 MB session costs the same as a small one. Full-text search streams each file in full and can be cancelled while it runs.
 
 Archived sessions move to `~/.claude/ccnav-archive/` or `~/.codex/ccnav-archive/`, keeping the folders they had underneath (`<project>/` for Claude, `YYYY/MM/DD/` for Codex). Moving a file back restores it. Sessions used in the last 10 minutes are never archived, because they may still be open. Archiving a Codex session leaves its line in `session_index.jsonl`; that is harmless but not cleaned up.
 

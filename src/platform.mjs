@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import crossSpawn from 'cross-spawn';
 
 export const IS_WIN = process.platform === 'win32';
 export const IS_MAC = process.platform === 'darwin';
@@ -17,9 +19,29 @@ export const hasCommand = has;
 
 // POSIX single-quote escaping for building `sh -c` / AppleScript command lines.
 const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
-// Windows command lines: quote args with spaces, strip embedded quotes (args are UUIDs and flags).
-const winq = s => /[\s"]/.test(s) ? `"${String(s).replace(/"/g, '')}"` : s;
 const osaString = s => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+// Encode the command and argv as data before handing them to PowerShell.
+function windowsCommand(cmd, args, { keepOpen = false } = {}) {
+  const spec = Buffer.from(JSON.stringify({ command: cmd, args }), 'utf8').toString('base64');
+  const run = `$ErrorActionPreference = 'Stop'; $spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${spec}')) | ConvertFrom-Json; $arguments = [string[]]$spec.args; $global:LASTEXITCODE = 0; try { & $spec.command @arguments } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 127 }`;
+  const script = keepOpen ? run : `${run}; exit $LASTEXITCODE`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  const shell = has('pwsh') ? 'pwsh' : 'powershell.exe';
+  return [shell, ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', ...(keepOpen ? ['-NoExit'] : []), '-EncodedCommand', encoded]];
+}
+
+// PowerShell 5 changes quoted arguments when its npm .ps1 shim forwards them to Node.
+// For that fallback, use the .cmd shim and reject values it can reinterpret.
+function legacyWindowsArgs(cmd, args) {
+  if (args.some(arg => /\0/.test(String(arg)))) return null;
+  const extension = path.extname(cmd).toLowerCase();
+  const where = spawnSync('where', [cmd], { encoding: 'utf8' });
+  const found = String(where.stdout || '').split(/\r?\n/);
+  const cmdShim = extension === '.cmd' || extension === '.bat'
+    || (extension !== '.exe' && found.some(p => /\.(cmd|bat)$/i.test(p)));
+  if (cmdShim && args.some(arg => /[\r\n"%!^&|<>]/.test(String(arg)))) return null;
+  return args;
+}
 
 export const INSTALL_PKG = {
   claude: '@anthropic-ai/claude-code',
@@ -30,16 +52,24 @@ const hint = cmd => INSTALL_PKG[cmd] ? ` Install it: npm install -g ${INSTALL_PK
 // Runs the agent in the foreground with the session's directory as cwd; resolves with its exit code.
 export function launchAgent(cmd, cwd, args) {
   return new Promise(resolve => {
-    // On Windows these are npm .cmd shims, which need a shell; elsewhere spawn them directly.
-    const child = IS_WIN
-      ? spawn([cmd, ...args.map(winq)].join(' '), { cwd, stdio: 'inherit', shell: true })
-      : spawn(cmd, args, { cwd, stdio: 'inherit' });
-    child.on('error', e => {
+    const legacy = IS_WIN && !has('pwsh');
+    const passedArgs = legacy ? legacyWindowsArgs(cmd, args) : args;
+    if (passedArgs === null) {
+      console.error('could not start agent: Windows PowerShell 5 cannot safely pass these arguments through a command shim; use PowerShell 7');
+      resolve(127);
+      return;
+    }
+    const [shell, shellArgs] = IS_WIN && !legacy ? windowsCommand(cmd, args) : [cmd, passedArgs];
+    const fail = e => {
       console.error(e.code === 'ENOENT'
-        ? `${cmd} was not found on PATH.${hint(cmd)}`
+        ? `${shell} was not found on PATH.${shell === cmd ? hint(cmd) : ''}`
         : `could not start ${cmd}: ${e.message}`);
       resolve(127);
-    });
+    };
+    let child;
+    try { child = legacy ? crossSpawn(shell, shellArgs, { cwd, stdio: 'inherit' }) : spawn(shell, shellArgs, { cwd, stdio: 'inherit' }); }
+    catch (error) { fail(error); return; }
+    child.on('error', fail);
     child.on('exit', code => resolve(code ?? 0));
   });
 }
@@ -85,7 +115,10 @@ export async function ensureAgent(cmd) {
   }
 
   console.log(`\nnpm install -g ${pkg}\n`);
-  const r = spawnSync(IS_WIN ? 'npm.cmd' : 'npm', ['install', '-g', pkg], { stdio: 'inherit', shell: IS_WIN });
+  const [installer, installArgs] = IS_WIN
+    ? windowsCommand('npm', ['install', '-g', pkg])
+    : ['npm', ['install', '-g', pkg]];
+  const r = spawnSync(installer, installArgs, { stdio: 'inherit' });
   if (r.error || r.status !== 0) {
     console.error(`\nInstall failed${r.error ? `: ${r.error.message}` : ` (npm exited with ${r.status})`}.`);
     console.error(`If it was a permissions error, npm's global folder is not writable by you.`);
@@ -124,10 +157,13 @@ function macAutomationError(e, app) {
 // Opens a new terminal tab (or window) in `cwd` running `cmd` with `args`. Throws if nothing worked.
 export function openInNewTab(cmd, cwd, args, title = cmd) {
   if (IS_WIN) {
-    const argv = ['-w', '0', 'new-tab', '--title', title.replace(/[;"]/g, ' ').slice(0, 40), '-d', cwd,
-      'pwsh', '-NoExit', '-Command', cmd, ...args];
-    // wt.exe is an app execution alias, which needs a shell to launch reliably; it returns immediately.
-    const r = spawnSync(['wt.exe', ...argv.map(winq)].join(' '), { shell: true, stdio: 'ignore', windowsHide: true });
+    const spec = Buffer.from(JSON.stringify({ cmd, cwd, args }), 'utf8').toString('base64');
+    const helper = fileURLToPath(new URL('./windows-tab.mjs', import.meta.url));
+    const [agentShell, agentArgs] = windowsCommand(process.execPath, [helper, spec], { keepOpen: true });
+    const argv = ['-w', '0', 'new-tab', '--title', title.replace(/[\r\n;"]/g, ' ').slice(0, 40), '-d', cwd,
+      agentShell, ...agentArgs];
+    const [terminalShell, terminalArgs] = windowsCommand('wt.exe', argv);
+    const r = spawnSync(terminalShell, terminalArgs, { stdio: 'ignore', windowsHide: true });
     if (r.error || r.status !== 0) throw new Error(r.error?.message || `wt.exe exited with ${r.status}`);
     return 'Windows Terminal tab';
   }

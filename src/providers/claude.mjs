@@ -68,18 +68,22 @@ export function readSession(file) {
 }
 
 // Top-level *.jsonl only: <sessionId>/ subdirectories hold subagent sidechains.
-export function listSessions() {
+export function listSessions({ onError = (file, error) => console.error(`ccnav: could not read Claude session at ${file}: ${error.message}`) } = {}) {
   if (!fs.existsSync(SESSIONS_ROOT)) return [];
   const out = [];
   for (const dir of fs.readdirSync(SESSIONS_ROOT, { withFileTypes: true })) {
     if (!dir.isDirectory()) continue;
     const projectDir = path.join(SESSIONS_ROOT, dir.name);
-    for (const f of fs.readdirSync(projectDir)) {
+    let files;
+    try { files = fs.readdirSync(projectDir); }
+    catch (error) { onError(projectDir, error); continue; }
+    for (const f of files) {
       if (!f.endsWith('.jsonl')) continue;
+      const file = path.join(projectDir, f);
       try {
-        const s = readSession(path.join(projectDir, f));
+        const s = readSession(file);
         if (s) out.push(s);
-      } catch { /* unreadable file */ }
+      } catch (error) { onError(file, error); }
     }
   }
   return out;

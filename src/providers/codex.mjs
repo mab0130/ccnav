@@ -18,10 +18,14 @@ export const ARCHIVE_ROOT = path.join(HOME_DIR, 'ccnav-archive');
 const INDEX_FILE = path.join(HOME_DIR, 'session_index.jsonl');
 
 // session_index.jsonl names about half the sessions; read it once per listing.
-function readIndex() {
+function readIndex(onError = () => {}) {
   const map = new Map();
   let text;
-  try { text = fs.readFileSync(INDEX_FILE, 'utf8'); } catch { return map; }
+  try { text = fs.readFileSync(INDEX_FILE, 'utf8'); }
+  catch (error) {
+    if (error.code !== 'ENOENT') onError(INDEX_FILE, error);
+    return map;
+  }
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
     try {
@@ -84,13 +88,14 @@ export function readSession(file, index = readIndex()) {
 }
 
 // sessions/YYYY/MM/DD/*.jsonl
-export function listSessions() {
+export function listSessions({ onError = (file, error) => console.error(`ccnav: could not read Codex session at ${file}: ${error.message}`) } = {}) {
   if (!fs.existsSync(SESSIONS_ROOT)) return [];
-  const index = readIndex();
+  const index = readIndex(onError);
   const out = [];
   const walk = (dir, depth) => {
     let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (error) { onError(dir, error); return; }
     for (const e of entries) {
       const p = path.join(dir, e.name);
       if (e.isDirectory() && depth < 3) walk(p, depth + 1);
@@ -98,7 +103,7 @@ export function listSessions() {
         try {
           const s = readSession(p, index);
           if (s && !s.subagent) out.push(s);
-        } catch { /* unreadable file */ }
+        } catch (error) { onError(p, error); }
       }
     }
   };

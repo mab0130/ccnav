@@ -101,10 +101,86 @@ test('launch arguments differ per agent', async () => {
   assert.deepEqual(codex.launchArgs('new', s, ['-m', 'gpt']), ['-m', 'gpt']);
 });
 
-test('full-text search returns the matching string, not raw JSON', () => {
+test('full-text search returns the matching string, not raw JSON', async () => {
   const [bbbb] = listSessions().filter(s => s.id === 'bbbb');
-  assert.match(searchTranscript(bbbb, 'PINEAPPLE'), /^the secret is pineapple$/);
-  assert.equal(searchTranscript(bbbb, 'zebra'), null);
+  assert.match(await searchTranscript(bbbb, 'PINEAPPLE'), /^the secret is pineapple$/);
+  assert.equal(await searchTranscript(bbbb, 'zebra'), null);
+  const cancelled = new AbortController();
+  cancelled.abort();
+  assert.equal(await searchTranscript(bbbb, 'pineapple', cancelled.signal), null);
+});
+
+test('head/tail reads include the final record for overlapping and separate slices', async () => {
+  const { readEnds } = await import('../src/jsonl.mjs');
+  const filler = JSON.stringify({ type: 'filler', text: 'x'.repeat(1000) }) + '\n';
+  for (const count of [300, 600]) {
+    const file = path.join(root, `tail-${count}.jsonl`);
+    fs.writeFileSync(file, filler.repeat(count) + JSON.stringify({ type: 'ai-title', aiTitle: `Last ${count}` }) + '\n');
+    const { head, tail } = readEnds(file);
+    assert.ok(head.length > 0);
+    assert.equal(tail.at(-1).aiTitle, `Last ${count}`);
+  }
+});
+
+test('unreadable session files are reported while other sessions remain visible', () => {
+  const bad = path.join(projectDir, 'unreadable.jsonl');
+  const corrupt = path.join(projectDir, 'corrupt.jsonl');
+  fs.mkdirSync(bad);
+  fs.writeFileSync(corrupt, '{invalid json}\n');
+  try {
+    const errors = [];
+    const sessions = listSessions({ agents: ['claude'], onError: (agent, file, error) => errors.push({ agent, file, error }) });
+    assert.equal(sessions.length, 3);
+    assert.deepEqual(errors.map(e => e.file).sort(), [bad, corrupt].sort());
+    assert.ok(errors.every(e => e.agent === 'claude'));
+  } finally {
+    fs.unlinkSync(corrupt);
+    fs.rmdirSync(bad);
+  }
+});
+
+test('Windows launch preserves special arguments or rejects them safely',
+  { skip: process.platform !== 'win32' && 'requires PowerShell' }, async () => {
+  const { launchAgent } = await import('../src/platform.mjs');
+  const bin = path.join(root, 'shim-bin');
+  const captured = path.join(root, 'captured-args.json');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, 'capture.mjs'),
+    "import fs from 'node:fs'; fs.writeFileSync(process.env.CCNAV_CAPTURE, JSON.stringify(process.argv.slice(2)));\n");
+  fs.writeFileSync(path.join(bin, 'capture.cmd'), `@echo off\r\n"${process.execPath}" "%~dp0capture.mjs" %*\r\n`);
+  fs.writeFileSync(path.join(bin, 'capture.ps1'), `& "${process.execPath}" "$PSScriptRoot/capture.mjs" @args\nexit $LASTEXITCODE\n`);
+  const saved = { path: process.env.PATH, capture: process.env.CCNAV_CAPTURE };
+  process.env.PATH = `${bin}${path.delimiter}${saved.path}`;
+  process.env.CCNAV_CAPTURE = captured;
+  try {
+    const args = ['space value', 'a&b', 'x|y', 'quote"inside', '100%', 'caret^', 'a^&b', '%COMSPEC%', '!PATH!', 'a"b&c', 'semi;colon', '$([int]42)', 'line1\r\nline2'];
+    assert.equal(await launchAgent('capture', root, args), 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(captured, 'utf8')), args);
+    assert.equal(await launchAgent(process.execPath, root, ['-e', 'process.exit(7)']), 7);
+    const { spawnSync } = await import('node:child_process');
+    const { fileURLToPath } = await import('node:url');
+    const helper = fileURLToPath(new URL('../src/windows-tab.mjs', import.meta.url));
+    const spec = Buffer.from(JSON.stringify({ cmd: 'capture', cwd: root, args })).toString('base64');
+    const tab = spawnSync(process.execPath, [helper, spec], { encoding: 'utf8' });
+    assert.equal(tab.status, 0, tab.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(captured, 'utf8')), args);
+    process.env.PATH = [path.join(process.env.SystemRoot, 'System32'),
+      path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0'), bin].join(path.delimiter);
+    const legacyArgs = ['space value', '--model', 'opus', 'C:\\Some Folder\\file.txt'];
+    assert.equal(await launchAgent('capture', root, legacyArgs), 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(captured, 'utf8')), legacyArgs);
+    assert.equal(await launchAgent(process.execPath, root, ['-e', 'process.exit(7)']), 7);
+    const originalError = console.error;
+    const errors = [];
+    console.error = message => errors.push(message);
+    try { assert.equal(await launchAgent('capture', root, args), 127); }
+    finally { console.error = originalError; }
+    assert.match(errors.join(' '), /cannot safely pass these arguments/);
+  } finally {
+    process.env.PATH = saved.path;
+    if (saved.capture === undefined) delete process.env.CCNAV_CAPTURE;
+    else process.env.CCNAV_CAPTURE = saved.capture;
+  }
 });
 
 test('picker groups both agents under one directory header with their glyphs', async () => {
@@ -115,6 +191,21 @@ test('picker groups both agents under one directory header with their glyphs', a
   assert.ok(frame.includes('◆ Session cccc'), frame);
   assert.ok(frame.includes('● Firewall review'), frame);
   assert.ok(/3 claude/.test(frame) && /1 codex/.test(frame), frame);
+  t.unmount();
+});
+
+test('picker applies an asynchronous full-transcript filter', async () => {
+  const t = render(React.createElement(App, { sessions: listSessions(), onChoose: () => {} }));
+  await wait();
+  t.stdin.write('/'); await wait();
+  t.stdin.write('\t'); await wait();
+  t.stdin.write('pineapple'); await wait();
+  t.stdin.write('\r');
+  for (let i = 0; i < 30 && !t.lastFrame().includes('1 transcripts match'); i++) await wait(20);
+  const frame = t.lastFrame();
+  assert.match(frame, /1 transcripts match/);
+  assert.match(frame, /Session bbbb/);
+  assert.doesNotMatch(frame, /Session cccc/);
   t.unmount();
 });
 

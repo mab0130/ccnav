@@ -25,14 +25,17 @@ export function parseLines(text, { dropFirst = false, dropLast = false } = {}) {
 // Returns { stat, head, tail }; tail === head when the file fits in one read.
 export function readEnds(file) {
   const stat = fs.statSync(file);
+  if (!stat.isFile()) throw new Error('not a regular file');
   const fd = fs.openSync(file, 'r');
   try {
     const headLen = Math.min(HEAD_BYTES, stat.size);
     const head = parseLines(readSlice(fd, 0, headLen), { dropLast: headLen < stat.size });
     const tailStart = Math.max(0, stat.size - TAIL_BYTES);
-    const tail = tailStart > headLen
-      ? parseLines(readSlice(fd, tailStart, stat.size - tailStart), { dropFirst: true })
+    const tail = stat.size > HEAD_BYTES
+      ? parseLines(readSlice(fd, tailStart, stat.size - tailStart),
+        { dropFirst: tailStart > 0 && readSlice(fd, tailStart - 1, 1) !== '\n' })
       : head;
+    if (stat.size && !head.length && !tail.length) throw new Error('no readable JSONL records');
     return { stat, head, tail };
   } finally {
     fs.closeSync(fd);

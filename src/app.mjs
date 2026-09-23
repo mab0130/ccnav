@@ -34,27 +34,33 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
   const [mode, setMode] = useState('list');
   const [deep, setDeep] = useState(false);
   const [deepHits, setDeepHits] = useState(null); // Map id -> snippet, for the last deep query
-  const [searching, setSearching] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(null);
   const [showScratch, setShowScratch] = useState(false);
   const [agentIdx, setAgentIdx] = useState(0); // 0 = all agents, then one per agent
   const [message, setMessage] = useState(null); // { text, color }
   const [days, setDays] = useState('30');
 
-  // Deep search reads whole transcripts, so it runs once per submitted query rather than per keystroke.
+  // Search once per submitted query, cancelling when the query or session list changes.
   useEffect(() => {
-    if (!searching) return;
-    const t = setTimeout(() => {
+    if (searchQuery === null) return;
+    const controller = new AbortController();
+    const search = async () => {
       const hits = new Map();
       for (const s of sessions) {
-        const snip = searchTranscript(s, filter);
+        if (controller.signal.aborted) return;
+        const snip = await searchTranscript(s, searchQuery, controller.signal);
         if (snip) hits.set(keyOf(s), snip);
       }
+      if (controller.signal.aborted) return;
       setDeepHits(hits);
-      setSearching(false);
+      setSearchQuery(null);
       setCursor(0);
-    }, 10);
-    return () => clearTimeout(t);
-  }, [searching]);
+    };
+    search();
+    return () => controller.abort();
+  }, [searchQuery, sessions]);
+
+  const searching = searchQuery !== null;
 
   const sorted = useMemo(() => {
     const q = filter.toLowerCase();
@@ -162,11 +168,11 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
     setMessage(null);
 
     if (mode === 'filter') {
-      if (key.escape) { setMode('list'); setFilter(''); setDeepHits(null); return; }
-      if (key.tab) { setDeep(d => !d); setDeepHits(null); return; }
-      if (key.return) { setMode('list'); if (deep && filter) setSearching(true); return; }
-      if (key.backspace || key.delete) { setFilter(f => f.slice(0, -1)); setDeepHits(null); setCursor(0); return; }
-      if (input && !key.ctrl && !key.meta) { setFilter(f => f + input); setDeepHits(null); setCursor(0); }
+      if (key.escape) { setMode('list'); setFilter(''); setDeepHits(null); setSearchQuery(null); return; }
+      if (key.tab) { setDeep(d => !d); setDeepHits(null); setSearchQuery(null); return; }
+      if (key.return) { setMode('list'); if (deep && filter) { setDeepHits(null); setSearchQuery(filter); } return; }
+      if (key.backspace || key.delete) { setFilter(f => f.slice(0, -1)); setDeepHits(null); setSearchQuery(null); setCursor(0); return; }
+      if (input && !key.ctrl && !key.meta) { setFilter(f => f + input); setDeepHits(null); setSearchQuery(null); setCursor(0); }
       return;
     }
 
@@ -234,7 +240,7 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
     else if (input === 's') { setSortIdx(i => (i + 1) % SORTS.length); setCursor(0); }
     else if (key.tab) { setAgentIdx(i => (i + 1) % (AGENTS.length + 1)); setCursor(0); }
     else if (input === 'a') { setShowScratch(v => !v); setCursor(0); }
-    else if (key.escape && filter) { setFilter(''); setDeepHits(null); setCursor(0); }
+    else if (key.escape && filter) { setFilter(''); setDeepHits(null); setSearchQuery(null); setCursor(0); }
     else if (input === 'q' || key.escape) exit();
   });
 

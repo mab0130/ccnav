@@ -5,11 +5,17 @@ import * as codex from './providers/codex.mjs';
 export const PROVIDERS = { claude, codex };
 export const AGENTS = Object.keys(PROVIDERS);
 
-// Both agents' sessions in one list, newest use first.
-export function listSessions({ agents = AGENTS } = {}) {
+const reportError = (agent, file, error) =>
+  console.error(`ccnav: could not read ${agent} sessions${file ? ` at ${file}` : ''}: ${error.message}`);
+
+// Both agents' sessions in one list, newest use first. Report unreadable sources on stderr.
+export function listSessions({ agents = AGENTS, onError = reportError } = {}) {
   const out = [];
   for (const name of agents) {
-    try { out.push(...PROVIDERS[name].listSessions()); } catch { /* provider not installed */ }
+    const provider = PROVIDERS[name];
+    if (!provider) { onError(name, null, new Error('unknown agent')); continue; }
+    try { out.push(...provider.listSessions({ onError: (file, error) => onError(name, file, error) })); }
+    catch (error) { onError(name, null, error); }
   }
   return out.sort((a, b) => b.lastUsed - a.lastUsed);
 }

@@ -1,31 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
+import { setImmediate as yieldToUi } from 'node:timers/promises';
 export { askUser, copyToClipboard, ensureAgent, hasCommand, installShellFunction, launchAgent, openFolder, openInNewTab } from './platform.mjs';
 
 // Sessions touched this recently may be open in another terminal.
 export const LIVE_WINDOW_MS = 10 * 60 * 1000;
 export const isMaybeLive = s => Date.now() - s.lastUsed < LIVE_WINDOW_MS;
 
-// Case-insensitive search through the whole transcript; returns a short snippet or null.
-export function searchTranscript(session, query) {
+// Stream the transcript so a search does not block the picker or load whole files into memory.
+export async function searchTranscript(session, query, signal) {
+  if (!query || signal?.aborted) return null;
   const q = query.toLowerCase();
-  let text;
-  try { text = fs.readFileSync(session.file, 'utf8'); } catch { return null; }
-  const lower = text.toLowerCase();
-  const idx = lower.indexOf(q);
-  if (idx < 0) return null;
-  // Prefer the matching string value from the parsed record over raw JSON.
-  const lineStart = text.lastIndexOf('\n', idx) + 1;
-  const lineEnd = text.indexOf('\n', idx);
-  let hay = text.slice(Math.max(0, idx - 60), idx + q.length + 80);
+  const stream = fs.createReadStream(session.file, { encoding: 'utf8', signal });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
   try {
-    const found = findString(JSON.parse(text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd)), q);
-    if (found) {
-      const i = found.toLowerCase().indexOf(q);
-      hay = found.slice(Math.max(0, i - 60), i + q.length + 80);
+    let count = 0;
+    for await (const line of lines) {
+      if (signal?.aborted) return null;
+      if (++count % 256 === 0) await yieldToUi();
+      const idx = line.toLowerCase().indexOf(q);
+      if (idx < 0) continue;
+      // Prefer the matching string value from the parsed record over raw JSON.
+      let hay = line.slice(Math.max(0, idx - 60), idx + q.length + 80);
+      try {
+        const found = findString(JSON.parse(line), q);
+        if (found) {
+          const i = found.toLowerCase().indexOf(q);
+          hay = found.slice(Math.max(0, i - 60), i + q.length + 80);
+        }
+      } catch { /* fall back to the raw line */ }
+      return hay.replace(/\\[nrt]/g, ' ').replace(/\s+/g, ' ').trim();
     }
-  } catch { /* fall back to raw slice */ }
-  return hay.replace(/\\[nrt]/g, ' ').replace(/\s+/g, ' ').trim();
+  } catch { /* unreadable or cancelled transcript */ }
+  finally { lines.close(); stream.destroy(); }
+  return null;
 }
 
 function findString(v, q) {
