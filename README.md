@@ -61,6 +61,8 @@ ccnav --json           print sessions as JSON and exit
 ccnav --model opus     any other arguments are passed to the agent
 ccnav here             new session in the current directory, running unattended
 ccnav here --codex     the same, without being asked which agent
+ccnav refresh          update token and cost totals from changed transcripts, then print them
+ccnav cost             print the totals from the last refresh
 ```
 
 ## Start one here
@@ -104,7 +106,7 @@ Codex removed `--full-auto` in 0.156, so the sandboxed middle ground is now spel
 | o | open the directory in Explorer, Finder or the Linux file manager |
 | c | copy the session id |
 | / | filter titles, paths, branches and prompts; Tab switches to full-transcript search |
-| s | cycle sort: last used, created, size, directory name (sessions stay grouped by directory) |
+| s | cycle sort: last used, created, size, context used, cost, directory name (sessions stay grouped by directory) |
 | x | archive the selected session |
 | X | archive every listed session not used in N days |
 | a | show or hide Claude Desktop scratch sessions |
@@ -125,6 +127,42 @@ Codex removed `--full-auto` in 0.156, so the sandboxed middle ground is now spel
 Only the first and last 256 KB of each transcript are read when listing, so a 21 MB session costs the same as a small one. Full-text search streams each file in full and can be cancelled while it runs.
 
 Archived sessions move to `~/.claude/ccnav-archive/` or `~/.codex/ccnav-archive/`, keeping the folders they had underneath (`<project>/` for Claude, `YYYY/MM/DD/` for Codex). Moving a file back restores it. Sessions used in the last 10 minutes are never archived, because they may still be open. Archiving a Codex session leaves its line in `session_index.jsonl`; that is harmless but not cleaned up.
+
+## Context and cost
+
+**CONTEXT** shows how full each session's context window was at its last request, for
+example `187k 19%`. It comes from the end of the transcript, which ccnav reads anyway, so it
+costs nothing extra. For Claude that is the request's input plus cache reads and writes, against
+the model's window (1M for current models). For Codex it is the last request's input, against the
+`model_context_window` that Codex records.
+
+**COST** is an estimate at API list prices. Working it out means reading every transcript in
+full, so ccnav never does that on its own. Run it when you want fresh numbers:
+
+```
+ccnav refresh          read every transcript that changed since the last refresh
+ccnav refresh --all    read them all again
+ccnav cost             print the last totals without reading any transcripts
+```
+
+`refresh` prints the total, then breakdowns by agent, model and directory. It stores token counts
+per session (not dollars) in `~/.ccnav/usage.json`, or `$CCNAV_HOME/usage.json`. Prices are applied
+when the numbers are shown, so a price change never needs a rescan. The picker and `--list`
+read that file, and a `+` after a cost means the session has changed since the last refresh.
+
+- Claude: each message is counted once, though Claude Code writes several records per message.
+  Subagent transcripts count towards their session. Cache writes are split into 5-minute and
+  1-hour writes, Haiku 5.5's prices for prompts over 100K tokens and fast mode are applied, and
+  web searches are charged at $0.01 each.
+- Codex: each model response is counted once. Subagent rollouts count towards the session that
+  spawned them, and prompts over 272K tokens pay the higher rates.
+- Archived or deleted sessions stay in the total and are shown on their own line.
+- Prices date from 2026-10-30 (`PRICES` in `src/usage.mjs`). To add a model or override a
+  price, put entries of the same shape in `~/.ccnav/prices.json`:
+  `{ "gpt-7": { "input": 3, "output": 12, "cacheRead": 0.3 } }` (USD per million tokens).
+- Not included: subscription billing (Pro, Max, ChatGPT plans charge differently), batch and
+  regional pricing, and server-tool fees other than web search. A forked session repeats its
+  parent's history, so that history can be counted twice.
 
 ## Test
 

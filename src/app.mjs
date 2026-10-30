@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { AGENTS, ago, humanSize, providerOf } from './sessions.mjs';
 import { archiveSession, copyToClipboard, hasCommand, isMaybeLive, openFolder, openInNewTab, searchTranscript } from './actions.mjs';
+import { contextLabel, humanTokens, money, tokensOf } from './usage.mjs';
 
 const h = React.createElement;
 
@@ -9,6 +10,8 @@ const SORTS = [
   { key: 'lastUsed', label: 'last used', fn: (a, b) => b.lastUsed - a.lastUsed },
   { key: 'created', label: 'created', fn: (a, b) => b.created - a.created },
   { key: 'size', label: 'size', fn: (a, b) => b.size - a.size },
+  { key: 'context', label: 'context used', fn: (a, b) => (b.context?.used ?? -1) - (a.context?.used ?? -1) || b.lastUsed - a.lastUsed },
+  { key: 'cost', label: 'cost', fn: (a, b) => (b.cost ?? -1) - (a.cost ?? -1) || b.lastUsed - a.lastUsed },
   { key: 'project', label: 'directory name', fn: (a, b) => a.cwd.toLowerCase().localeCompare(b.cwd.toLowerCase()) || b.lastUsed - a.lastUsed },
 ];
 
@@ -18,10 +21,28 @@ const pad = (s, n) => {
 };
 const oneLine = s => String(s || '').replace(/\s+/g, ' ').trim();
 const keyOf = s => `${s.agent}:${s.id}`;
+
+// Model and context window come from the transcript's tail; tokens and cost from the last refresh.
+function usageLine(s) {
+  const parts = [];
+  if (s.model) parts.push(s.model);
+  if (s.context?.used) parts.push(`context ${humanTokens(s.context.used)} of ${humanTokens(s.context.window)}`
+    + ` (${Math.round((s.context.used / s.context.window) * 100)}%)`);
+  if (s.usage) {
+    const t = Object.values(s.usage).reduce((a, x) => ({
+      input: a.input + x.input, write: a.write + x.cacheWrite5m + x.cacheWrite1h,
+      read: a.read + x.cacheRead, output: a.output + x.output, all: a.all + tokensOf(x),
+    }), { input: 0, write: 0, read: 0, output: 0, all: 0 });
+    parts.push(`${humanTokens(t.all)} tokens (in ${humanTokens(t.input)} · cache write ${humanTokens(t.write)}`
+      + ` · cache read ${humanTokens(t.read)} · out ${humanTokens(t.output)})`);
+    parts.push(`~${money(s.cost)}${s.costStale ? ', changed since the last refresh' : ''}`);
+  } else parts.push('cost: run ccnav refresh');
+  return parts.join('  ·  ');
+}
 const DAY = 86400 * 1000;
 
 // mode: list | filter | confirm-archive | prune-days | confirm-prune
-export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
+export function App({ sessions: initialSessions, onChoose, passthrough = [], refreshedAt = null }) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const width = stdout?.columns || 120;
@@ -97,7 +118,7 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
   }, [rows, days]);
 
   const sel = rows[Math.min(cursor, rows.length - 1)];
-  const listHeight = Math.max(4, height - 13);
+  const listHeight = Math.max(4, height - 14);
 
   // Display lines: a (possibly wrapping) header per directory, then its sessions.
   const items = useMemo(() => {
@@ -244,9 +265,14 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
     else if (input === 'q' || key.escape) exit();
   });
 
-  const cTitle = Math.max(20, width - 4 - 2 - 14 - 10 - 10 - 7 - 5);
+  const cTitle = Math.max(20, width - 4 - 2 - 14 - 10 - 10 - 7 - 9 - 9 - 7);
   const header = pad('TITLE', cTitle) + ' ' + pad('BRANCH', 14) + ' '
-    + pad('CREATED', 10) + ' ' + pad('LAST USED', 10) + ' ' + pad('SIZE', 7);
+    + pad('CREATED', 10) + ' ' + pad('LAST USED', 10) + ' ' + pad('SIZE', 7) + ' '
+    + pad('CONTEXT', 9) + ' ' + 'COST'.padStart(9);
+  const costed = rows.filter(s => s.cost != null);
+  const costNote = !refreshedAt ? ' · ccnav refresh for costs'
+    : ` · ${money(costed.reduce((a, s) => a + s.cost, 0))} est.`
+      + (costed.some(s => s.costStale) || costed.length < rows.length ? ` as of ${ago(new Date(refreshedAt))} (+ changed since)` : '');
   const hiddenScratch = showScratch ? 0 : sessions.filter(s => s.scratch).length;
   const agentCounts = AGENTS
     .map(a => [a, rows.filter(s => s.agent === a).length])
@@ -278,11 +304,12 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
 
   return h(Box, { flexDirection: 'column', width },
     h(Box, null,
-      h(Text, { bold: true, color: 'cyan' }, 'ccnav'),
-      h(Text, { dimColor: true },
+      h(Box, { flexShrink: 0 }, h(Text, { bold: true, color: 'cyan' }, 'ccnav')),
+      h(Text, { dimColor: true, wrap: 'truncate' },
         ` ${rows.length} sessions${agentCounts} · sorted by ${SORTS[sortIdx].label}`
         + (AGENTS[agentIdx - 1] ? ` · ${AGENTS[agentIdx - 1]} only (tab)` : '')
-        + (hiddenScratch ? ` · ${hiddenScratch} desktop scratch hidden (a)` : '')),
+        + (hiddenScratch ? ` · ${hiddenScratch} desktop scratch hidden (a)` : '')
+        + costNote),
     ),
     filterLine,
     h(Text, { bold: true, dimColor: true }, '      ' + header),
@@ -295,7 +322,8 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
       const active = it.index === cursor;
       const line = pad(oneLine(s.title || s.firstPrompt) || '(untitled)', cTitle) + ' '
         + pad(s.branch, 14) + ' ' + pad(ago(s.created), 10) + ' ' + pad(ago(s.lastUsed), 10) + ' '
-        + pad(humanSize(s.size), 7);
+        + pad(humanSize(s.size), 7) + ' ' + pad(contextLabel(s.context), 9) + ' '
+        + (s.cost == null ? '' : money(s.cost) + (s.costStale ? '+' : '')).padStart(9);
       return h(Text, { key: keyOf(s), inverse: active, color: s.cwdExists ? undefined : 'red', wrap: 'truncate' },
         (active ? '  › ' : '    '),
         h(Text, { color: s.cwdExists ? p.color : 'red' }, p.glyph + ' '),
@@ -310,6 +338,7 @@ export function App({ sessions: initialSessions, onChoose, passthrough = [] }) {
           h(Text, { dimColor: true }, `  ·  ${sel.agent}${sel.origin === 'desktop' ? ' (desktop/IDE)' : ''}`
             + `${sel.version ? ' ' + sel.version : ''}`
             + `  ·  started ${sel.created.toLocaleString()}  ·  last ${sel.lastUsed.toLocaleString()}`)),
+        h(Text, { key: 'u', wrap: 'truncate' }, h(Text, { dimColor: true }, 'usage  '), usageLine(sel)),
         h(Text, { key: 'f', wrap: 'truncate' }, h(Text, { dimColor: true }, 'first  '), oneLine(sel.firstPrompt)),
         snippet
           ? h(Text, { key: 'm', wrap: 'truncate' }, h(Text, { dimColor: true }, 'match  '), h(Text, { color: 'yellow' }, '…' + snippet + '…'))

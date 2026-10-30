@@ -14,6 +14,7 @@ const workDir = path.join(root, 'work');
 const projectDir = path.join(config, 'projects', 'proj');
 process.env.CLAUDE_CONFIG_DIR = config;
 process.env.CODEX_HOME = codexHome;
+process.env.CCNAV_HOME = path.join(root, 'ccnav');
 
 const { listSessions } = await import('../src/sessions.mjs');
 const { ARCHIVE_ROOT: CLAUDE_ARCHIVE } = await import('../src/providers/claude.mjs');
@@ -27,6 +28,17 @@ const SESSIONS = [
   ['cccc', new Date(Date.now() - 86400e3).toISOString(), 'mango'],
 ];
 
+const turn = (id, model, usage, extra = {}) =>
+  ({ type: 'assistant', timestamp: new Date().toISOString(), ...extra, message: { id, model, content: [{ type: 'text', text: 'ok' }], usage } });
+const write1h = n => ({ cache_creation_input_tokens: n, cache_creation: { ephemeral_1h_input_tokens: n, ephemeral_5m_input_tokens: 0 } });
+// m1 appears twice and the later copy has the final output count; m2 is the last request.
+const CCCC_TURNS = [
+  turn('m1', 'claude-opus-5-5', { input_tokens: 10, ...write1h(1000), output_tokens: 5 }),
+  turn('m1', 'claude-opus-5-5', { input_tokens: 10, ...write1h(1000), output_tokens: 50 }),
+  turn('m2', 'claude-opus-5-5', { input_tokens: 2, cache_read_input_tokens: 1000, ...write1h(200), output_tokens: 100,
+    server_tool_use: { web_search_requests: 2 } }),
+];
+
 // One Codex rollout (plus a subagent one that must stay hidden) and its index entry.
 function writeCodexFixture() {
   const day = path.join(codexHome, 'sessions', '2026', '09', '19');
@@ -38,14 +50,23 @@ function writeCodexFixture() {
   const prompt = '<recommended_plugins>noise</recommended_plugins>\nreview the firewall rules';
   const user = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } };
   const done = { type: 'event_msg', timestamp: '2026-09-19T21:11:19.877Z', payload: { type: 'task_complete', last_agent_message: 'the mango rule was wrong' } };
+  const turnContext = { type: 'turn_context', payload: { model: 'gpt-6.1-sol' } };
+  const usage = (response_id, input_tokens, cached_input_tokens, output_tokens) =>
+    ({ type: 'token_usage_record', payload: { response_id, usage: { input_tokens, cached_input_tokens, cache_write_input_tokens: 0, output_tokens } } });
+  const count = { type: 'event_msg', payload: { type: 'token_count', info: {
+    total_token_usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 20 },
+    last_token_usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 20 }, model_context_window: 475000 } } };
   const write = (file, records, mtime) => {
     fs.writeFileSync(file, records.map(r => JSON.stringify(r)).join('\n') + '\n');
     if (mtime) fs.utimesSync(file, mtime, mtime);
   };
   const when = new Date('2026-09-19T21:11:20Z') / 1000;
-  write(path.join(day, 'rollout-2026-09-19T17-02-00-cx01.jsonl'), [meta('cx01', 'cli'), user, done], when);
+  // r1 is recorded twice and must count once.
+  write(path.join(day, 'rollout-2026-09-19T17-02-00-cx01.jsonl'),
+    [meta('cx01', 'cli'), user, turnContext, usage('r1', 1000, 800, 20), usage('r1', 1000, 800, 20), count, done], when);
+  // The subagent's tokens bill to cx01; a 300K prompt is past gpt-6.1-sol's long-context threshold.
   write(path.join(day, 'rollout-2026-09-19T17-30-00-cx02.jsonl'),
-    [meta('cx02', { subagent: { thread_spawn: { parent_thread_id: 'cx01', depth: 1 } } }), user], when);
+    [meta('cx02', { subagent: { thread_spawn: { parent_thread_id: 'cx01', depth: 1 } } }), user, turnContext, usage('r9', 300000, 0, 10)], when);
   write(path.join(codexHome, 'session_index.jsonl'),
     [{ id: 'cx01', thread_name: 'Firewall review', updated_at: '2026-09-19T21:11:20Z' }]);
 }
@@ -55,12 +76,17 @@ before(() => {
   fs.mkdirSync(path.join(projectDir, 'aaaa'), { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   fs.writeFileSync(path.join(projectDir, 'aaaa', 'agent-side.jsonl'), '{}\n');
+  // A subagent of cccc on Haiku 5.5 with a 150K prompt, past its 100K long-prompt threshold.
+  fs.mkdirSync(path.join(projectDir, 'cccc', 'subagents'), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, 'cccc', 'subagents', 'agent-a.jsonl'),
+    JSON.stringify(turn('s1', 'claude-haiku-5-5', { input_tokens: 150000, output_tokens: 10 }, { isSidechain: true })) + '\n');
   for (const [id, ts, word] of SESSIONS) {
     const file = path.join(projectDir, `${id}.jsonl`);
     const lines = [
       { type: 'user', isMeta: true, message: { role: 'user', content: '<system-reminder>ignore me</system-reminder>' }, cwd: workDir, timestamp: ts },
       { type: 'user', message: { role: 'user', content: `hello ${id}` }, cwd: workDir, timestamp: ts, gitBranch: 'main' },
       { type: 'assistant', message: { content: [{ type: 'text', text: `the secret is ${word}` }] }, timestamp: ts },
+      ...(id === 'cccc' ? CCCC_TURNS : []),
       { type: 'ai-title', aiTitle: `Session ${id}` },
     ];
     fs.writeFileSync(file, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
@@ -219,6 +245,116 @@ test('Enter hands the selected session to onChoose', async () => {
   assert.equal(chosen.session.id, 'cx01');
   assert.equal(chosen.session.agent, 'codex');
   t.unmount();
+});
+
+test('context size comes from the last request in the tail, for both agents', () => {
+  const byId = Object.fromEntries(listSessions().map(s => [s.id, s]));
+  assert.equal(byId.cccc.model, 'claude-opus-5-5');
+  assert.deepEqual(byId.cccc.context, { used: 2 + 1000 + 200, window: 1_000_000 });
+  assert.equal(byId.cx01.model, 'gpt-6.1-sol');
+  assert.deepEqual(byId.cx01.context, { used: 1000, window: 475000 });
+  assert.equal(byId.bbbb.context, null);
+});
+
+test('prices match the longest model id and apply per-request tiers', async () => {
+  const { priceOf, contextWindow, costOf } = await import('../src/usage.mjs');
+  assert.equal(priceOf('claude-opus-5-5').input, 4);
+  assert.equal(priceOf('claude-opus-5').input, 5);
+  assert.equal(priceOf('claude-fable-5').cacheRead, 1);
+  assert.equal(contextWindow('claude-haiku-4-5-20251001'), 200_000);
+  assert.equal(priceOf('some-new-model'), null);
+  const t = { input: 1e6, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0, output: 0, webSearches: 0, requests: 1 };
+  assert.equal(costOf({ 'claude-haiku-5-5': t }).cost, 0.1);
+  assert.equal(costOf({ 'claude-haiku-5-5@long': t }).cost, 0.5);
+  assert.equal(costOf({ 'claude-opus-5-5@fast': t }).cost, 8);
+  assert.deepEqual(costOf({ 'some-new-model': t }), { cost: 0, unpriced: ['some-new-model'] });
+});
+
+test('refresh reads whole transcripts once, then only the ones that changed', async () => {
+  const { PROVIDERS } = await import('../src/sessions.mjs');
+  const { attachUsage, costOf, loadUsageCache, refreshUsage, saveUsageCache, summaryLines } = await import('../src/usage.mjs');
+  const first = await refreshUsage(listSessions(), { providers: PROVIDERS });
+  assert.deepEqual([first.scanned, first.reused], [4, 0]);
+  saveUsageCache(first.cache);
+
+  const cccc = loadUsageCache().sessions['claude:cccc'].byModel;
+  // m1 counted once with its final output; the subagent's request lands in the long tier.
+  assert.deepEqual(cccc['claude-opus-5-5'],
+    { input: 12, cacheWrite5m: 0, cacheWrite1h: 1200, cacheRead: 1000, output: 150, webSearches: 2, requests: 2 });
+  assert.deepEqual(cccc['claude-haiku-5-5@long'],
+    { input: 150000, cacheWrite5m: 0, cacheWrite1h: 0, cacheRead: 0, output: 10, webSearches: 0, requests: 1 });
+  assert.ok(Math.abs(costOf(cccc).cost - (0.012848 + 0.02 + 0.075025)) < 1e-9);
+
+  const cx01 = loadUsageCache().sessions['codex:cx01'].byModel;
+  assert.equal(cx01['gpt-6.1-sol'].requests, 1);
+  assert.deepEqual([cx01['gpt-6.1-sol'].input, cx01['gpt-6.1-sol'].cacheRead], [200, 800]);
+  assert.equal(cx01['gpt-6.1-sol@long'].input, 300000);
+
+  const second = await refreshUsage(listSessions(), { providers: PROVIDERS, cache: loadUsageCache() });
+  assert.deepEqual([second.scanned, second.reused], [0, 4]);
+
+  let sessions = listSessions();
+  attachUsage(sessions);
+  const before = sessions.find(s => s.id === 'cccc');
+  assert.ok(before.cost > 0.1 && !before.costStale);
+
+  const file = before.file;
+  fs.appendFileSync(file, JSON.stringify(turn('m3', 'claude-opus-5-5',
+    { input_tokens: 2, cache_read_input_tokens: 1000, ...write1h(200), output_tokens: 1 })) + '\n');
+  sessions = listSessions();
+  attachUsage(sessions);
+  assert.equal(sessions.find(s => s.id === 'cccc').costStale, true);
+  const third = await refreshUsage(sessions, { providers: PROVIDERS, cache: loadUsageCache() });
+  assert.deepEqual([third.scanned, third.reused], [1, 3]);
+
+  const report = summaryLines(third.cache).join('\n');
+  assert.match(report, /all 4 sessions/);
+  assert.match(report, /claude-haiku-5-5@long/);
+  assert.doesNotMatch(report, /Not priced/);
+});
+
+test('a transcript that vanishes mid-refresh is reported and the rest still saved', async () => {
+  const { PROVIDERS } = await import('../src/sessions.mjs');
+  const { refreshUsage } = await import('../src/usage.mjs');
+  const sessions = listSessions();
+  // A copy of bbbb under a new id, deleted after listing but before its scan.
+  const ghost = { ...sessions.find(s => s.id === 'bbbb'), id: 'ghost', file: path.join(projectDir, 'ghost.jsonl'), extraPaths: [] };
+  const errors = [];
+  const r = await refreshUsage([...sessions, ghost], { all: true, providers: PROVIDERS, cache: { version: 1, sessions: {} },
+    onError: (s, e) => errors.push(s.id) });
+  assert.deepEqual([r.scanned, r.reused, r.failed], [4, 0, 1]);
+  assert.deepEqual(errors, ['ghost']);
+  assert.deepEqual(Object.keys(r.cache.sessions).sort(), ['claude:aaaa', 'claude:bbbb', 'claude:cccc', 'codex:cx01']);
+});
+
+test('picker shows context and cost columns and the listed total', async () => {
+  const { attachUsage } = await import('../src/usage.mjs');
+  const sessions = listSessions();
+  const cache = attachUsage(sessions);
+  const t = render(React.createElement(App, { sessions, refreshedAt: cache.refreshedAt, onChoose: () => {} }));
+  await wait();
+  const frame = t.lastFrame();
+  assert.match(frame, /CONTEXT\s+COST/);
+  assert.match(frame, /1k 0%\s+\$0\.11/);
+  assert.match(frame, /\$1\.31 est\./);
+  assert.match(frame, /usage {2}claude-opus-5-5 {2}· {2}context 1k of 1M/);
+  t.unmount();
+});
+
+test('`ccnav cost` reads the cache only, and says so when there is none', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const bin = fileURLToPath(new URL('../bin/ccnav.mjs', import.meta.url));
+  const env = { ...process.env, CCNAV_HOME: path.join(root, 'fresh-home') };
+  const none = spawnSync(process.execPath, [bin, 'cost'], { encoding: 'utf8', env });
+  assert.match(none.stdout, /Run: ccnav refresh/);
+  assert.ok(!fs.existsSync(path.join(root, 'fresh-home')));
+  const refresh = spawnSync(process.execPath, [bin, 'refresh'], { encoding: 'utf8', env });
+  assert.equal(refresh.status, 0, refresh.stderr);
+  assert.match(refresh.stdout, /Read 4 changed sessions, 0 unchanged/);
+  const cost = spawnSync(process.execPath, [bin, 'cost'], { encoding: 'utf8', env });
+  assert.match(cost.stdout, /From the refresh just now/);
+  assert.match(cost.stdout, /\$1\.31/);
 });
 
 test('archive moves the transcript and its sidechain folder', () => {

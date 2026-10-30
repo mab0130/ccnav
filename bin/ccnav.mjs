@@ -4,6 +4,7 @@ import { render } from 'ink';
 import { App } from '../src/app.mjs';
 import { AGENTS, PROVIDERS, ago, humanSize, listSessions, providerOf, shortPath } from '../src/sessions.mjs';
 import { askUser, ensureAgent, installShellFunction, launchAgent, reportCwd } from '../src/actions.mjs';
+import { CACHE_FILE, attachUsage, contextLabel, loadUsageCache, money, refreshUsage, saveUsageCache, summaryLines } from '../src/usage.mjs';
 
 const args = process.argv.slice(2);
 
@@ -20,6 +21,10 @@ usage:
   ccnav here             skip the picker: start a NEW session in the current
                          directory, running unattended with no permission prompts
                          (ccnav here --claude / --codex picks the agent outright)
+  ccnav refresh          read every changed transcript in full and update token and
+                         cost totals, then print them (--all rereads everything)
+  ccnav cost             print the totals from the last refresh without reading
+                         any transcripts
   ccnav --install-shell  add a shell function (PowerShell, zsh, bash or fish) so
                          your shell is left in the session's directory afterwards
 
@@ -61,6 +66,37 @@ if (args[0] === 'here') {
   process.exit(await launchAgent(provider.command, process.cwd(), argv));
 }
 
+// Cost is the one thing that needs whole transcripts, so it is only ever read here, on request.
+if (args[0] === 'refresh') {
+  const started = Date.now();
+  const sessions = listSessions();
+  const tty = process.stderr.isTTY;
+  const { cache, scanned, reused, failed } = await refreshUsage(sessions, {
+    all: args.includes('--all'),
+    providers: PROVIDERS,
+    onProgress: (i, n) => { if (tty && (i % 5 === 0 || i === n)) process.stderr.write(`\rreading transcripts ${i}/${n}`); },
+  });
+  if (tty) process.stderr.write('\r\x1b[K');
+  saveUsageCache(cache);
+  console.log(`Read ${scanned} changed session${scanned === 1 ? '' : 's'}, ${reused} unchanged, `
+    + (failed ? `${failed} unreadable (kept their previous totals), ` : '')
+    + `in ${((Date.now() - started) / 1000).toFixed(1)}s. Saved to ${CACHE_FILE}\n`);
+  console.log(summaryLines(cache, { shortPath }).join('\n'));
+  process.exit(0);
+}
+
+if (args[0] === 'cost') {
+  const cache = loadUsageCache();
+  if (!cache.refreshedAt) { console.log('No usage recorded yet. Run: ccnav refresh'); process.exit(0); }
+  const sessions = listSessions();
+  attachUsage(sessions, cache);
+  const changed = sessions.filter(s => s.cost == null || s.costStale).length;
+  console.log(`From the refresh ${ago(new Date(cache.refreshedAt))}`
+    + (changed ? `; ${changed} session${changed === 1 ? ' has' : 's have'} changed since (ccnav refresh to update)` : '') + '\n');
+  console.log(summaryLines(cache, { shortPath }).join('\n'));
+  process.exit(0);
+}
+
 if (args.includes('--install-shell')) {
   const { shell, file, reload } = installShellFunction();
   console.log(`ccnav ${shell} function written to ${file}\nto use it now: ${reload}`);
@@ -72,6 +108,7 @@ const OWN_FLAGS = new Set(['--list', '--json', '--install-shell', '--claude', '-
 const passthrough = args.filter(a => !OWN_FLAGS.has(a));
 const agents = ['claude', 'codex'].filter(a => args.includes(`--${a}`));
 const sessions = listSessions(agents.length ? { agents } : {});
+const usageCache = attachUsage(sessions);
 
 if (args.includes('--json')) {
   console.log(JSON.stringify(sessions, null, 2));
@@ -81,6 +118,7 @@ if (args.includes('--json')) {
 if (args.includes('--list')) {
   for (const s of sessions) {
     console.log([s.agent.padEnd(6), ago(s.lastUsed).padEnd(9), ago(s.created).padEnd(9), humanSize(s.size).padStart(6),
+      contextLabel(s.context).padStart(9), (money(s.cost) + (s.costStale ? '+' : '')).padStart(9),
       shortPath(s.cwd).padEnd(40), (s.title || s.firstPrompt).replace(/\s+/g, ' ').slice(0, 60)].join('  '));
   }
   process.exit(0);
@@ -92,7 +130,7 @@ if (!process.stdin.isTTY) {
 }
 
 let choice = null;
-const app = render(React.createElement(App, { sessions, passthrough, onChoose: c => { choice = c; } }));
+const app = render(React.createElement(App, { sessions, passthrough, refreshedAt: usageCache.refreshedAt, onChoose: c => { choice = c; } }));
 await app.waitUntilExit();
 
 if (!choice) process.exit(0);

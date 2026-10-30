@@ -2,7 +2,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { humanText, readEnds } from '../jsonl.mjs';
+import { forEachRecord, humanText, jsonlFilesUnder, readEnds } from '../jsonl.mjs';
+import { addTally, contextWindow, fingerprint, tallyKey } from '../usage.mjs';
 
 export const agent = 'claude';
 export const command = 'claude';
@@ -27,8 +28,9 @@ export function readSession(file) {
   const { stat, head, tail } = readEnds(file);
   const firstMsg = head.find(r => r.cwd && r.timestamp);
   const firstPrompt = head.map(promptText).find(Boolean);
-  let title, lastPrompt, lastTs, bridge, lastCwd, branch;
+  let title, lastPrompt, lastTs, bridge, lastCwd, branch, lastTurn;
   for (const r of tail) {
+    if (r.type === 'assistant' && !r.isSidechain && r.message?.usage && r.message.model !== '<synthetic>') lastTurn = r.message;
     if (r.type === 'ai-title' && r.aiTitle) title = r.aiTitle;
     if (r.type === 'custom-title' && r.customTitle) title = r.customTitle;
     if (r.type === 'last-prompt' && r.lastPrompt) lastPrompt = r.lastPrompt;
@@ -43,6 +45,7 @@ export function readSession(file) {
   if (!cwd) return null; // no conversation ever happened
 
   const id = path.basename(file, '.jsonl');
+  const u = lastTurn?.usage;
   return {
     agent, id, file,
     // Subagent sidechains live in a folder named after the session; archive it alongside.
@@ -62,6 +65,13 @@ export function readSession(file) {
     created: new Date(firstMsg?.timestamp || stat.birthtime),
     lastUsed: lastTs ? new Date(Math.max(new Date(lastTs), stat.mtime)) : stat.mtime,
     size: stat.size,
+    fingerprint: fingerprint(stat),
+    model: lastTurn?.model || '',
+    // What the last request sent, i.e. how full the context window is now.
+    context: u ? {
+      used: (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0),
+      window: contextWindow(lastTurn.model),
+    } : null,
     // Claude Desktop scratch folders: %APPDATA%\Claude\... on Windows, ~/Library/Application Support/Claude/... on macOS.
     scratch: /[\\/]Claude[\\/]scratch-workspaces[\\/]/i.test(cwd),
   };
@@ -87,6 +97,47 @@ export function listSessions({ onError = (file, error) => console.error(`ccnav: 
     }
   }
   return out;
+}
+
+// The transcript plus its subagent transcripts (<id>/subagents/*.jsonl), which bill to this session.
+const usageFiles = s => [s.file, ...(s.extraPaths || []).flatMap(jsonlFilesUnder)];
+
+export function usageFingerprint(s) {
+  return usageFiles(s).map(f => {
+    try { return fingerprint(fs.statSync(f)); } catch { return '-'; }
+  }).join(';');
+}
+
+// Claude Code writes one record per content block, all carrying the message's usage, and later
+// copies can have higher output counts while streaming finishes: keep the last copy of each id.
+export async function scanUsage(s) {
+  const turns = new Map();
+  let anon = 0;
+  for (const f of usageFiles(s)) {
+    await forEachRecord(f, ['"usage"'], r => {
+      const m = r.message;
+      if (r.type !== 'assistant' || !m?.usage || m.model === '<synthetic>') return;
+      turns.set(m.id || `anon-${anon++}`, m);
+    });
+  }
+  const byModel = {};
+  for (const m of turns.values()) {
+    const u = m.usage;
+    const write = u.cache_creation_input_tokens || 0;
+    const write1h = Math.min(write, u.cache_creation?.ephemeral_1h_input_tokens || 0);
+    const t = {
+      input: u.input_tokens || 0,
+      cacheWrite5m: write - write1h,
+      cacheWrite1h: write1h,
+      cacheRead: u.cache_read_input_tokens || 0,
+      output: u.output_tokens || 0,
+      webSearches: u.server_tool_use?.web_search_requests || 0,
+      requests: 1,
+    };
+    const prompt = t.input + write + t.cacheRead;
+    addTally(byModel, tallyKey(m.model || 'unknown', { prompt, fast: u.speed === 'fast' }), t);
+  }
+  return byModel;
 }
 
 export function launchArgs(action, session, passthrough = []) {

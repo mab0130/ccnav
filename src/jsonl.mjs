@@ -1,5 +1,7 @@
 // Shared JSONL reading: transcripts reach tens of MB, so only the ends are read.
 import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
 
 export const HEAD_BYTES = 256 * 1024;
 export const TAIL_BYTES = 256 * 1024;
@@ -45,4 +47,28 @@ export function readEnds(file) {
 // Text a person typed, with injected <system-reminder>-style wrappers removed.
 export function humanText(text) {
   return String(text || '').replace(/<([\w-]+)[^>]*>[\s\S]*?<\/\1>/g, '').trim();
+}
+
+// Streams every record of a whole file; lines without any of `needles` are skipped unparsed,
+// which keeps a full pass over hundreds of MB of transcripts to a few seconds.
+export async function forEachRecord(file, needles, fn) {
+  const stream = fs.createReadStream(file, { encoding: 'utf8' });
+  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!needles.some(n => line.includes(n))) continue;
+      let r;
+      try { r = JSON.parse(line); } catch { continue; }
+      fn(r);
+    }
+  } finally { lines.close(); stream.destroy(); }
+}
+
+// Every *.jsonl below dir (none if it does not exist), in a stable order.
+export function jsonlFilesUnder(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true, recursive: true }); }
+  catch { return []; }
+  return entries.filter(e => e.isFile() && e.name.endsWith('.jsonl'))
+    .map(e => path.join(e.parentPath ?? e.path, e.name)).sort();
 }
