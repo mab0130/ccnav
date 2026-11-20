@@ -164,6 +164,13 @@ read that file, and a `+` after a cost means the session has changed since the l
   regional pricing, and server-tool fees other than web search. A forked session repeats its
   parent's history, so that history can be counted twice.
 
+## Troubleshooting
+
+If a resumed session ignores the keyboard, or drops keys, set `CCNAV_DEBUG=1` before running
+ccnav. Each launch appends two lines to `ccnav-debug.log` in your temp folder (`%TEMP%` on Windows,
+`$TMPDIR` or `/tmp` elsewhere) recording ccnav's stdin state just before the agent starts. The
+`after` line should show `destroyed=true`, meaning ccnav has stopped reading the terminal.
+
 ## Test
 
 ```sh

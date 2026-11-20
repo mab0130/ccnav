@@ -49,8 +49,37 @@ export const INSTALL_PKG = {
 };
 const hint = cmd => INSTALL_PKG[cmd] ? ` Install it: npm install -g ${INSTALL_PKG[cmd]}` : '';
 
+// Before the agent takes over the terminal, ccnav must stop reading it. Ink only turns raw mode off
+// and detaches its listener; the stream keeps reading, and on Windows that leaves a ReadConsole call
+// pending in this process that wins keystrokes (Ctrl+C too) from the agent sharing the console.
+// pause() does not stop a TTY read; closing the handle does. libuv reads through its own duplicate of
+// the console handle (and never closes fd 0-2 on POSIX), so the child still inherits a working fd 0.
+async function releaseStdin() {
+  const stdin = process.stdin;
+  const state = label => process.env.CCNAV_DEBUG && fs.appendFileSync(path.join(os.tmpdir(), 'ccnav-debug.log'),
+    `${new Date().toISOString()} ${label} isTTY=${stdin.isTTY} isRaw=${stdin.isRaw} reading=${stdin._handle?.reading}`
+    + ` flowing=${stdin.readableFlowing} destroyed=${stdin.destroyed} data=${stdin.listenerCount('data')}`
+    + ` readable=${stdin.listenerCount('readable')} keypress=${stdin.listenerCount('keypress')}\n`);
+  try {
+    state('before');
+    if (!stdin.isTTY || stdin.destroyed) return;
+    try { if (stdin.isRaw) stdin.setRawMode(false); } catch { /* already restored */ }
+    stdin.removeAllListeners('data');
+    stdin.removeAllListeners('readable');
+    stdin.removeAllListeners('keypress');
+    stdin.pause();
+    await new Promise(done => {
+      const timer = setTimeout(done, 250);
+      stdin.once('close', () => { clearTimeout(timer); done(); });
+      stdin.destroy();
+    });
+    state('after');
+  } catch { /* never block the launch on this */ }
+}
+
 // Runs the agent in the foreground with the session's directory as cwd; resolves with its exit code.
-export function launchAgent(cmd, cwd, args) {
+export async function launchAgent(cmd, cwd, args) {
+  await releaseStdin();
   return new Promise(resolve => {
     const legacy = IS_WIN && !has('pwsh');
     const passedArgs = legacy ? legacyWindowsArgs(cmd, args) : args;
