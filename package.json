@@ -12,7 +12,7 @@
     "cli",
     "codex"
   ],
-  "author": "rts-mb",
+  "author": "Michael Brown (https://github.com/mab0130)",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -37,10 +37,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/rts-mb/ccnav.git"
+    "url": "git+https://github.com/mab0130/ccnav.git"
   },
-  "homepage": "https://github.com/rts-mb/ccnav#readme",
+  "homepage": "https://github.com/mab0130/ccnav#readme",
   "bugs": {
-    "url": "https://github.com/rts-mb/ccnav/issues"
+    "url": "https://github.com/mab0130/ccnav/issues"
   }
 }
