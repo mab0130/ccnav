@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { forEachRecord, humanText, readEnds } from '../jsonl.mjs';
-import { addTally, contextWindow, emptyTally, fingerprint, tallyKey } from '../usage.mjs';
+import { addTally, contextWindow, dayOf, emptyTally, fingerprint, tallyKey } from '../usage.mjs';
 
 export const agent = 'codex';
 export const command = 'codex';
@@ -140,11 +140,12 @@ export function usageFingerprint(s) {
 }
 
 // One token_usage_record per model response. Rollouts from before those records existed only have
-// running totals in token_count events, so the last of those is used instead.
+// running totals in token_count events, so the last of those is used instead, dated by that event.
+// Returns the tallies per local day.
 export async function scanUsage(s) {
-  const byModel = {};
+  const byDay = {};
   for (const f of usageFiles(s)) {
-    let model = 'unknown', total = null, totalModel = model, records = 0;
+    let model = 'unknown', total = null, totalModel = model, totalDay = '', records = 0;
     const seen = new Set();
     await forEachRecord(f, ['"turn_context"', '"session_meta"', '"token_usage_record"', '"token_count"'], r => {
       const p = r.payload;
@@ -153,15 +154,16 @@ export async function scanUsage(s) {
         if (p.response_id && seen.has(p.response_id)) return;
         seen.add(p.response_id);
         records++;
-        addUsage(byModel, model, p.usage, 1);
+        addUsage(byDay[dayOf(r.timestamp)] ||= {}, model, p.usage, 1);
       } else if (p?.type === 'token_count' && p.info?.total_token_usage) {
         total = p.info.total_token_usage;
         totalModel = model;
+        totalDay = dayOf(r.timestamp);
       }
     });
-    if (!records && total) addUsage(byModel, totalModel, total, 0);
+    if (!records && total) addUsage(byDay[totalDay] ||= {}, totalModel, total, 0);
   }
-  return byModel;
+  return byDay;
 }
 
 function addUsage(byModel, model, u, requests) {

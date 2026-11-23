@@ -3,7 +3,7 @@
   "version": "1.2.1",
   "description": "Claude Codex Navigator - pick a Claude Code or Codex session and resume it in its directory",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/ccnav.test.mjs"
   },
   "keywords": [
     "claude",

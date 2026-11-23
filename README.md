@@ -63,6 +63,7 @@ ccnav here             new session in the current directory, running unattended
 ccnav here --codex     the same, without being asked which agent
 ccnav refresh          update token and cost totals from changed transcripts, then print them
 ccnav cost             print the totals from the last refresh
+ccnav cost --since 7d  the same, for the last 7 days only (--daily adds a per-day table)
 ```
 
 ## Start one here
@@ -143,10 +144,12 @@ full, so ccnav never does that on its own. Run it when you want fresh numbers:
 ccnav refresh          read every transcript that changed since the last refresh
 ccnav refresh --all    read them all again
 ccnav cost             print the last totals without reading any transcripts
+ccnav cost --since 7d  only usage from the last 7 days (or --since 2026-11-01)
+ccnav cost --daily     add a cost-per-day table (both flags work with refresh too)
 ```
 
 `refresh` prints the total, then breakdowns by agent, model and directory. It stores token counts
-per session (not dollars) in `~/.ccnav/usage.json`, or `$CCNAV_HOME/usage.json`. Prices are applied
+per session and per day (not dollars) in `~/.ccnav/usage.json`, or `$CCNAV_HOME/usage.json`. Prices are applied
 when the numbers are shown, so a price change never needs a rescan. The picker and `--list`
 read that file, and a `+` after a cost means the session has changed since the last refresh.
 
@@ -157,6 +160,10 @@ read that file, and a `+` after a cost means the session has changed since the l
 - Codex: each model response is counted once. Subagent rollouts count towards the session that
   spawned them, and prompts over 272K tokens pay the higher rates.
 - Archived or deleted sessions stay in the total and are shown on their own line.
+- Days are local calendar days, taken from each request's timestamp. Older Codex rollouts that only
+  record running totals are put on the day of their last total. Totals saved by ccnav 1.2.1 or
+  earlier have no days, so the first refresh after upgrading reads every transcript again. Sessions
+  archived or deleted before then cannot be dated; `--since` and `--daily` leave them out and say how many.
 - Prices date from 2026-10-30 (`PRICES` in `src/usage.mjs`). To add a model or override a
   price, put entries of the same shape in `~/.ccnav/prices.json`:
   `{ "gpt-7": { "input": 3, "output": 12, "cacheRead": 0.3 } }` (USD per million tokens).
@@ -175,5 +182,6 @@ ccnav. Each launch appends two lines to `ccnav-debug.log` in your temp folder (`
 
 ```sh
 npm test                                                               # unit + UI tests, any OS
+                                                                       # (on Windows, also a real-console handoff test)
 docker run --rm -v "$PWD:/src:ro" node:24 bash /src/test/docker-e2e.sh # Linux install + zsh end-to-end
 ```

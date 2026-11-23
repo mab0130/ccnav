@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { forEachRecord, humanText, jsonlFilesUnder, readEnds } from '../jsonl.mjs';
-import { addTally, contextWindow, fingerprint, tallyKey } from '../usage.mjs';
+import { addTally, contextWindow, dayOf, fingerprint, tallyKey } from '../usage.mjs';
 
 export const agent = 'claude';
 export const command = 'claude';
@@ -110,6 +110,7 @@ export function usageFingerprint(s) {
 
 // Claude Code writes one record per content block, all carrying the message's usage, and later
 // copies can have higher output counts while streaming finishes: keep the last copy of each id.
+// Returns the tallies per local day, dated by that last copy.
 export async function scanUsage(s) {
   const turns = new Map();
   let anon = 0;
@@ -117,11 +118,11 @@ export async function scanUsage(s) {
     await forEachRecord(f, ['"usage"'], r => {
       const m = r.message;
       if (r.type !== 'assistant' || !m?.usage || m.model === '<synthetic>') return;
-      turns.set(m.id || `anon-${anon++}`, m);
+      turns.set(m.id || `anon-${anon++}`, { m, day: dayOf(r.timestamp) });
     });
   }
-  const byModel = {};
-  for (const m of turns.values()) {
+  const byDay = {};
+  for (const { m, day } of turns.values()) {
     const u = m.usage;
     const write = u.cache_creation_input_tokens || 0;
     const write1h = Math.min(write, u.cache_creation?.ephemeral_1h_input_tokens || 0);
@@ -135,9 +136,9 @@ export async function scanUsage(s) {
       requests: 1,
     };
     const prompt = t.input + write + t.cacheRead;
-    addTally(byModel, tallyKey(m.model || 'unknown', { prompt, fast: u.speed === 'fast' }), t);
+    addTally(byDay[day] ||= {}, tallyKey(m.model || 'unknown', { prompt, fast: u.speed === 'fast' }), t);
   }
-  return byModel;
+  return byDay;
 }
 
 export function launchArgs(action, session, passthrough = []) {

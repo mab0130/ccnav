@@ -105,6 +105,28 @@ export function sumTallies(list) {
   return out;
 }
 
+// --- days ---
+
+// Usage is bucketed by the local calendar day of each request, as YYYY-MM-DD.
+export const UNDATED = 'undated';
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+export function dayOf(ts) {
+  const d = new Date(ts);
+  return ts && !Number.isNaN(d.getTime()) ? ymd(d) : UNDATED;
+}
+
+// `7d` is today and the six days before it; a YYYY-MM-DD date is taken as is. Null when unrecognised.
+export function parseSince(text, now = new Date()) {
+  const s = String(text || '').trim().toLowerCase();
+  if (s === 'today') return ymd(now);
+  const n = /^(\d+)d$/.exec(s);
+  if (n && Number(n[1]) >= 1) return ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (Number(n[1]) - 1)));
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s) && dayOf(`${s}T12:00:00`) === s) return s;
+  return null;
+}
+
+const inPeriod = (day, since) => day !== UNDATED && (!since || day >= since);
+
 // --- the cache written by `ccnav refresh` ---
 
 export const fingerprint = stat => `${stat.size}:${Math.round(stat.mtimeMs)}`;
@@ -153,14 +175,16 @@ export async function refreshUsage(sessions, {
     const fullFp = provider.usageFingerprint(s);
     const prev = cache.sessions[key];
     onProgress(i + 1, sessions.length, s);
-    if (!all && prev && prev.fp === fullFp) { prev.gone = false; reused++; continue; }
+    // Entries from before daily totals were kept are read again once, to add them.
+    if (!all && prev && prev.fp === fullFp && prev.byDay) { prev.gone = false; reused++; continue; }
     // A transcript archived or locked mid-refresh keeps its previous entry and fingerprint,
     // so the next refresh tries it again; the rest of the run still gets saved.
-    let byModel;
-    try { byModel = await provider.scanUsage(s); }
+    let byDay;
+    try { byDay = await provider.scanUsage(s); }
     catch (error) { onError(s, error); failed++; if (prev) prev.gone = false; continue; }
+    // The session totals are the sum of its days, so the two can never disagree.
     cache.sessions[key] = { agent: s.agent, id: s.id, cwd: s.cwd, title: s.title || s.firstPrompt?.slice(0, 80) || '',
-      fp: fullFp, mainFp: s.fingerprint, byModel, gone: false };
+      fp: fullFp, mainFp: s.fingerprint, byModel: sumTallies(Object.values(byDay)), byDay, gone: false };
     scanned++;
   }
   for (const [key, entry] of Object.entries(cache.sessions)) if (!listed.has(key)) entry.gone = true;
@@ -189,10 +213,37 @@ export function contextLabel(ctx) {
   return `${humanTokens(ctx.used)} ${Math.round((ctx.used / ctx.window) * 100)}%`;
 }
 
-// The report printed by `ccnav refresh` and `ccnav cost`.
-export function summaryLines(cache, { top = 10, shortPath = p => p } = {}) {
-  const entries = Object.values(cache.sessions);
-  if (!entries.length) return ['No usage recorded yet. Run: ccnav refresh'];
+// The report printed by `ccnav refresh` and `ccnav cost`. `since` (YYYY-MM-DD) limits it to usage on
+// or after that day; `daily` adds a by-day section. Sessions with no daily totals cannot be placed in a
+// period, so they are left out of one and the report says how many.
+export function summaryLines(cache, { top = 10, shortPath = p => p, since = null, daily = false } = {}) {
+  const recorded = Object.values(cache.sessions);
+  if (!recorded.length) return ['No usage recorded yet. Run: ccnav refresh'];
+  const undated = recorded.filter(e => !e.byDay);
+  const entries = !since ? recorded : recorded.flatMap(e => {
+    if (!e.byDay) return [];
+    const byModel = sumTallies(Object.entries(e.byDay).filter(([day]) => inPeriod(day, since)).map(([, t]) => t));
+    return Object.values(byModel).some(t => tokensOf(t) || t.webSearches) ? [{ ...e, byModel }] : [];
+  });
+  // Requests with no readable timestamp belong to no day, so a period or daily view cannot count them either.
+  const untimed = recorded.filter(e => e.byDay?.[UNDATED]);
+  const notCounted = () => {
+    const out = [];
+    if (undated.length) {
+      const n = undated.length, refreshable = undated.filter(e => !e.gone).length, gone = n - refreshable;
+      const parts = [];
+      if (refreshable) parts.push(`ccnav refresh adds ${refreshable === n ? 'them' : refreshable}`);
+      if (gone) parts.push(`${gone === n ? (n === 1 ? 'it was' : 'they were') : `${gone} were`} archived or deleted, so cannot be read again`);
+      out.push(`${n} session${n === 1 ? '' : 's'} not counted here, from before ccnav kept daily totals: ${parts.join('; ')}.`);
+    }
+    if (untimed.length) {
+      const t = sumTallies(untimed.map(e => e.byDay[UNDATED]));
+      out.push(`Not counted here: ${humanTokens(Object.values(t).reduce((a, x) => a + tokensOf(x), 0))} tokens`
+        + ` (${money(costOf(t).cost)}) in ${untimed.length} session${untimed.length === 1 ? '' : 's'} with no timestamp on the request.`);
+    }
+    return out;
+  };
+  if (!entries.length) return [`No usage on or after ${since}.`, ...notCounted()];
   const row = (label, byModel, extra = '') => {
     const { cost } = costOf(byModel);
     const t = Object.values(byModel).reduce((a, x) => a + tokensOf(x), 0);
@@ -211,10 +262,23 @@ export function summaryLines(cache, { top = 10, shortPath = p => p } = {}) {
   };
   const all = sumTallies(entries.map(e => e.byModel));
   const gone = entries.filter(e => e.gone);
-  const out = [`Estimated cost at API list prices (prices as of ${PRICES_AS_OF})`, ''];
+  const out = [`Estimated cost at API list prices (prices as of ${PRICES_AS_OF})`
+    + (since ? `, for usage on or after ${since}` : ''), ''];
   out.push(row(`all ${entries.length} sessions`, all));
   for (const [agent, t] of group(e => e.agent)) out.push(row(agent, t));
   if (gone.length) out.push(row(`  of which archived or deleted (${gone.length})`, sumTallies(gone.map(e => e.byModel))));
+
+  if (daily) {
+    const days = new Map();
+    for (const e of entries) {
+      for (const [day, t] of Object.entries(e.byDay || {})) if (inPeriod(day, since)) days.set(day, sumTallies([days.get(day), t]));
+    }
+    const newest = [...days.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));
+    const shown = since ? newest : newest.slice(0, 31);
+    out.push('', `by day${shown.length < newest.length ? ` (latest ${shown.length} of ${newest.length}; --since for more)` : ''}`);
+    for (const [day, t] of shown) out.push(row(day, t));
+  }
+  if (since || daily) out.push(...notCounted().map(l => `  ${l}`));
 
   out.push('', 'by model');
   const byModel = Object.entries(all).map(([k, t]) => [k, { [k]: t }])

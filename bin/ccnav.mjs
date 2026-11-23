@@ -1,10 +1,7 @@
 #!/usr/bin/env node
-import React from 'react';
-import { render } from 'ink';
-import { App } from '../src/app.mjs';
 import { AGENTS, PROVIDERS, ago, humanSize, listSessions, providerOf, shortPath } from '../src/sessions.mjs';
 import { askUser, ensureAgent, installShellFunction, launchAgent, reportCwd } from '../src/actions.mjs';
-import { CACHE_FILE, attachUsage, contextLabel, loadUsageCache, money, refreshUsage, saveUsageCache, summaryLines } from '../src/usage.mjs';
+import { CACHE_FILE, attachUsage, contextLabel, loadUsageCache, money, parseSince, refreshUsage, saveUsageCache, summaryLines } from '../src/usage.mjs';
 
 const args = process.argv.slice(2);
 
@@ -25,6 +22,9 @@ usage:
                          cost totals, then print them (--all rereads everything)
   ccnav cost             print the totals from the last refresh without reading
                          any transcripts
+      --since 7d         (refresh or cost) only usage from the last 7 days, or
+      --since 2026-11-01 on or after a date; days are local calendar days
+      --daily            (refresh or cost) add a cost-per-day table
   ccnav --install-shell  add a shell function (PowerShell, zsh, bash or fish) so
                          your shell is left in the session's directory afterwards
 
@@ -66,8 +66,21 @@ if (args[0] === 'here') {
   process.exit(await launchAgent(provider.command, process.cwd(), argv));
 }
 
+// `--since 7d` / `--since 2026-11-01` and `--daily`, shared by refresh and cost.
+function reportOptions() {
+  const i = args.indexOf('--since');
+  const raw = i >= 0 ? args[i + 1] : null;
+  const since = i >= 0 ? parseSince(raw) : null;
+  if (i >= 0 && !since) {
+    console.error(`--since needs a number of days or a date, e.g. --since 7d or --since 2026-11-01 (got ${raw ?? 'nothing'})`);
+    process.exit(1);
+  }
+  return { shortPath, since, daily: args.includes('--daily') };
+}
+
 // Cost is the one thing that needs whole transcripts, so it is only ever read here, on request.
 if (args[0] === 'refresh') {
+  const report = reportOptions();
   const started = Date.now();
   const sessions = listSessions();
   const tty = process.stderr.isTTY;
@@ -81,11 +94,12 @@ if (args[0] === 'refresh') {
   console.log(`Read ${scanned} changed session${scanned === 1 ? '' : 's'}, ${reused} unchanged, `
     + (failed ? `${failed} unreadable (kept their previous totals), ` : '')
     + `in ${((Date.now() - started) / 1000).toFixed(1)}s. Saved to ${CACHE_FILE}\n`);
-  console.log(summaryLines(cache, { shortPath }).join('\n'));
+  console.log(summaryLines(cache, report).join('\n'));
   process.exit(0);
 }
 
 if (args[0] === 'cost') {
+  const report = reportOptions();
   const cache = loadUsageCache();
   if (!cache.refreshedAt) { console.log('No usage recorded yet. Run: ccnav refresh'); process.exit(0); }
   const sessions = listSessions();
@@ -93,7 +107,7 @@ if (args[0] === 'cost') {
   const changed = sessions.filter(s => s.cost == null || s.costStale).length;
   console.log(`From the refresh ${ago(new Date(cache.refreshedAt))}`
     + (changed ? `; ${changed} session${changed === 1 ? ' has' : 's have'} changed since (ccnav refresh to update)` : '') + '\n');
-  console.log(summaryLines(cache, { shortPath }).join('\n'));
+  console.log(summaryLines(cache, report).join('\n'));
   process.exit(0);
 }
 
@@ -129,6 +143,8 @@ if (!process.stdin.isTTY) {
   process.exit(1);
 }
 
+// Ink and React take most of a second to load, so only the picker pays for them.
+const [{ default: React }, { render }, { App }] = await Promise.all([import('react'), import('ink'), import('../src/app.mjs')]);
 let choice = null;
 const app = render(React.createElement(App, { sessions, passthrough, refreshedAt: usageCache.refreshedAt, onChoose: c => { choice = c; } }));
 await app.waitUntilExit();

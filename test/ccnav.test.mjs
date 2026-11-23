@@ -22,6 +22,9 @@ const { ARCHIVE_ROOT: CODEX_ARCHIVE } = await import('../src/providers/codex.mjs
 const { archiveSession, searchTranscript } = await import('../src/actions.mjs');
 const { App } = await import('../src/app.mjs');
 
+// The subagent's request is a day later, so cx01's usage spans two days.
+const CODEX_TIMES = { r1: '2026-09-19T21:05:00Z', r9: '2026-09-20T15:00:00Z' };
+
 const SESSIONS = [
   ['aaaa', '2026-01-01T00:00:00Z', 'zebra'],
   ['bbbb', '2026-06-01T00:00:00Z', 'pineapple'],
@@ -51,8 +54,8 @@ function writeCodexFixture() {
   const user = { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } };
   const done = { type: 'event_msg', timestamp: '2026-09-19T21:11:19.877Z', payload: { type: 'task_complete', last_agent_message: 'the mango rule was wrong' } };
   const turnContext = { type: 'turn_context', payload: { model: 'gpt-6.1-sol' } };
-  const usage = (response_id, input_tokens, cached_input_tokens, output_tokens) =>
-    ({ type: 'token_usage_record', payload: { response_id, usage: { input_tokens, cached_input_tokens, cache_write_input_tokens: 0, output_tokens } } });
+  const usage = (response_id, input_tokens, cached_input_tokens, output_tokens, timestamp = CODEX_TIMES[response_id]) =>
+    ({ timestamp, type: 'token_usage_record', payload: { response_id, usage: { input_tokens, cached_input_tokens, cache_write_input_tokens: 0, output_tokens } } });
   const count = { type: 'event_msg', payload: { type: 'token_count', info: {
     total_token_usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 20 },
     last_token_usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 20 }, model_context_window: 475000 } } };
@@ -327,6 +330,52 @@ test('a transcript that vanishes mid-refresh is reported and the rest still save
   assert.deepEqual(Object.keys(r.cache.sessions).sort(), ['claude:aaaa', 'claude:bbbb', 'claude:cccc', 'codex:cx01']);
 });
 
+test('usage is kept per local day, and a report can cover just a period', async () => {
+  const { PROVIDERS } = await import('../src/sessions.mjs');
+  const { UNDATED, dayOf, emptyTally, parseSince, refreshUsage, sumTallies, summaryLines } = await import('../src/usage.mjs');
+  const now = new Date(2026, 10, 20, 12); // local noon, so these hold in any time zone
+  assert.equal(parseSince('7d', now), '2026-11-14');
+  assert.equal(parseSince('1d', now), '2026-11-20');
+  assert.equal(parseSince('today', now), '2026-11-20');
+  assert.equal(parseSince('2026-11-01', now), '2026-11-01');
+  for (const bad of ['0d', 'banana', '2026-02-30', '', undefined]) assert.equal(parseSince(bad, now), null);
+  assert.equal(dayOf(new Date(2026, 0, 2, 23, 59).toISOString()), '2026-01-02'); // the local day, not UTC's
+  assert.equal(dayOf(undefined), UNDATED);
+
+  // Every session's totals are exactly the sum of its days.
+  const fresh = await refreshUsage(listSessions(), { all: true, providers: PROVIDERS, cache: { version: 1, sessions: {} } });
+  for (const e of Object.values(fresh.cache.sessions)) assert.deepEqual(sumTallies(Object.values(e.byDay)), e.byModel);
+  const cccc = fresh.cache.sessions['claude:cccc'];
+  assert.deepEqual(Object.keys(cccc.byDay), [dayOf(CCCC_TURNS[0].timestamp)]);
+  const cx01 = fresh.cache.sessions['codex:cx01'].byDay;
+  assert.deepEqual(Object.keys(cx01).sort(), [dayOf(CODEX_TIMES.r1), dayOf(CODEX_TIMES.r9)].sort());
+  assert.equal(cx01[dayOf(CODEX_TIMES.r9)]['gpt-6.1-sol@long'].input, 300000);
+
+  // A cache entry from before daily totals is read again once, even though its transcript is unchanged.
+  delete cccc.byDay;
+  const again = await refreshUsage(listSessions(), { providers: PROVIDERS, cache: fresh.cache });
+  assert.deepEqual([again.scanned, again.reused], [1, 3]);
+  assert.ok(again.cache.sessions['claude:cccc'].byDay);
+
+  const opus = n => ({ 'claude-opus-5-5': { ...emptyTally(), input: n, requests: 1 } });
+  const cache = { version: 1, refreshedAt: now.toISOString(), sessions: {
+    'claude:a': { agent: 'claude', cwd: '/a', byModel: opus(3e6), byDay: { '2026-11-10': opus(1e6), '2026-11-18': opus(2e6) } },
+    'claude:old': { agent: 'claude', cwd: '/b', byModel: opus(5e6), gone: true },
+    'claude:untimed': { agent: 'claude', cwd: '/c', byModel: opus(25e4), byDay: { [UNDATED]: opus(25e4) } },
+  } };
+  const period = summaryLines(cache, { since: '2026-11-14', daily: true }).join('\n');
+  assert.match(period, /on or after 2026-11-14/);
+  assert.match(period, /all 1 sessions\s+\$8\.00/); // 2M input tokens at $4 per million
+  assert.match(period, /2026-11-18\s+\$8\.00/);
+  assert.doesNotMatch(period, /2026-11-10/);
+  assert.match(period, /1 session not counted here, from before ccnav kept daily totals: it was archived or deleted/);
+  assert.match(period, /Not counted here: 250k tokens \(\$1\.00\) in 1 session with no timestamp/);
+  assert.match(summaryLines(cache, { since: '2026-12-01' }).join('\n'), /No usage on or after 2026-12-01/);
+  const everything = summaryLines(cache).join('\n');
+  assert.match(everything, /all 3 sessions\s+\$33\.00/);
+  assert.doesNotMatch(everything, /not counted/);
+});
+
 test('picker shows context and cost columns and the listed total', async () => {
   const { attachUsage } = await import('../src/usage.mjs');
   const sessions = listSessions();
@@ -392,6 +441,32 @@ test('shell function install is idempotent', { skip: process.platform === 'win32
   } finally {
     for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : process.env[k] = v;
   }
+});
+
+// Regression: after the picker closed, ccnav kept reading the console and took keystrokes from the
+// agent. Needs a real console, so the fixture runs in a hidden window of its own.
+test('the agent gets the terminal to itself after the picker closes',
+  { skip: process.platform !== 'win32' && 'needs a real console; the POSIX pseudo-terminal leg is not written yet' }, async () => {
+  const { spawnSync } = await import('node:child_process');
+  const out = path.join(root, 'tty-handoff.json');
+  const lit = s => `'${String(s).replace(/'/g, "''")}'`;
+  const quoted = s => lit(`"${s}"`);
+  const { fileURLToPath } = await import('node:url');
+  const fixture = fileURLToPath(new URL('./fixtures/tty-handoff.mjs', import.meta.url));
+  const platformFile = fileURLToPath(new URL('../src/platform.mjs', import.meta.url));
+  const shell = spawnSync('where', ['pwsh'], { stdio: 'ignore' }).status === 0 ? 'pwsh' : 'powershell.exe';
+  const r = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command',
+    `Start-Process -FilePath ${lit(process.execPath)} -ArgumentList ${[fixture, platformFile, out].map(quoted).join(',')}`
+    + ` -WorkingDirectory ${lit(process.cwd())} -WindowStyle Hidden -Wait`], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(r.status, 0, r.stderr || r.error?.message);
+  const result = JSON.parse(fs.readFileSync(out, 'utf8'));
+  assert.equal(result.error, undefined, result.error);
+  assert.equal(result.afterInk.isTTY, true, 'the fixture did not get a console');
+  assert.equal(typeof result.afterInk.reading, 'boolean', 'stdin read state is no longer observable');
+  assert.equal(result.afterLaunch.destroyed, true, 'ccnav still held stdin while the agent ran');
+  assert.notEqual(result.afterLaunch.reading, true, 'ccnav was still reading the console while the agent ran');
+  assert.deepEqual(result.probe, { isTTY: true, raw: true });
+  assert.equal(result.exitCode, 0);
 });
 
 test('an installed agent launches without prompting to install', async () => {
