@@ -107,11 +107,12 @@ export async function launchAgent(cmd, cwd, args) {
 
 // Resolves the trimmed answer, or null when stdin closed without one (ctrl-D, a closed pipe).
 // Resolving on 'close' rather than only in the callback keeps the promise from hanging on EOF.
-export function askUser(question) {
+// Answers are lowercased unless keepCase is set, for names and paths.
+export function askUser(question, { keepCase = false } = {}) {
   return new Promise(resolve => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     let answer = null;
-    rl.question(question, a => { answer = String(a).trim().toLowerCase(); rl.close(); });
+    rl.question(question, a => { answer = String(a).trim(); if (!keepCase) answer = answer.toLowerCase(); rl.close(); });
     rl.on('close', () => resolve(answer));
   });
 }

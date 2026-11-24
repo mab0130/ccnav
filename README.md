@@ -61,6 +61,7 @@ ccnav --json           print sessions as JSON and exit
 ccnav --model opus     any other arguments are passed to the agent
 ccnav here             new session in the current directory, running unattended
 ccnav here --codex     the same, without being asked which agent
+ccnav new myapp        new project: make <projects folder>/myapp, git init, start there unattended
 ccnav refresh          update token and cost totals from changed transcripts, then print them
 ccnav cost             print the totals from the last refresh
 ccnav cost --since 7d  the same, for the last 7 days only (--daily adds a per-day table)
@@ -94,6 +95,28 @@ that are already sandboxed. Neither confines the agent to the directory you star
 Codex removed `--full-auto` in 0.156, so the sandboxed middle ground is now spelled
 `--ask-for-approval never --sandbox workspace-write` if you would rather edit
 `src/providers/codex.mjs` to use that instead.
+
+## Start a new project
+
+`ccnav new myapp` makes a folder named `myapp` in your projects folder, runs `git init`
+in it, and then does what `ccnav here` does there: asks which agent and starts it
+**unattended**, with the same flags and the same warnings as above.
+
+```
+ccnav new                         asks for the name
+ccnav new myapp --codex           skips the agent question; other arguments go to the agent
+ccnav new --projects-dir ~/code   change the projects folder (on its own, just saves it)
+```
+
+The first `ccnav new` asks which folder to create projects in (enter takes `~/Projects`)
+and saves the answer as `projectsDir` in `~/.ccnav/config.json` (or `$CCNAV_HOME/config.json`).
+It never reuses a folder: if `myapp` already exists it stops, so `cd` there and use
+`ccnav here` instead. The name has to be a single folder name that works on every OS, so
+no `/ \ : * ? " < > |`, no trailing dot or space, and none of Windows' reserved names
+(`CON`, `NUL`, `COM1` …). The folder is only made once the agent is chosen and installed,
+so answering no or pressing ctrl-D leaves nothing behind. If git is missing, the folder is
+made anyway and ccnav says that git init was skipped. With the `--install-shell` function,
+your shell ends up in the new project when the agent exits.
 
 | Key | Action |
 |---|---|

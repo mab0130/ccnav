@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
 import { AGENTS, PROVIDERS, ago, humanSize, listSessions, providerOf, shortPath } from '../src/sessions.mjs';
 import { askUser, ensureAgent, installShellFunction, launchAgent, reportCwd } from '../src/actions.mjs';
 import { CACHE_FILE, attachUsage, contextLabel, loadUsageCache, money, parseSince, refreshUsage, saveUsageCache, summaryLines } from '../src/usage.mjs';
@@ -18,6 +20,10 @@ usage:
   ccnav here             skip the picker: start a NEW session in the current
                          directory, running unattended with no permission prompts
                          (ccnav here --claude / --codex picks the agent outright)
+  ccnav new [name]       start a NEW project: make <projects folder>/<name>, git init
+                         it, and start an agent there unattended, as ccnav here does.
+                         Asks for the projects folder the first time and saves it;
+      --projects-dir <path>  changes it (on its own, just saves it)
   ccnav refresh          read every changed transcript in full and update token and
                          cost totals, then print them (--all rereads everything)
   ccnav cost             print the totals from the last refresh without reading
@@ -32,13 +38,13 @@ Any other arguments are passed to the agent (e.g. ccnav --model opus).`);
   process.exit(0);
 }
 
-// `ccnav here` never touches the session list: it starts a new one in this directory.
-async function chooseAgent() {
+// `ccnav here` and `ccnav new` never touch the session list: they start a new session in `dir`.
+async function chooseAgent(dir, command) {
   if (!process.stdin.isTTY) {
-    console.error('ccnav here needs an interactive terminal, or name the agent: ccnav here --claude');
+    console.error(`${command} needs an interactive terminal, or name the agent: ${command} --claude`);
     process.exit(1);
   }
-  console.log(`\nNew session in ${process.cwd()}\n`);
+  console.log(`\nNew session in ${dir}\n`);
   AGENTS.forEach((a, i) => {
     const p = PROVIDERS[a];
     console.log(`  ${i + 1}) ${p.glyph} ${a.padEnd(7)} ${p.command} ${p.AUTO_ARGS.join(' ')}`);
@@ -59,11 +65,72 @@ if (args[0] === 'here') {
   const rest = args.slice(1);
   const named = AGENTS.find(a => rest.includes(`--${a}`));
   const extra = rest.filter(a => a !== '--' && !AGENTS.some(x => a === `--${x}`));
-  const provider = PROVIDERS[named || await chooseAgent()];
+  const provider = PROVIDERS[named || await chooseAgent(process.cwd(), 'ccnav here')];
   if (!await ensureAgent(provider.command)) process.exit(127);
   const argv = [...provider.AUTO_ARGS, ...extra];
   console.log(`\n\u2192 ${process.cwd()}\n\u2192 ${provider.command} ${argv.join(' ')}\n`);
   process.exit(await launchAgent(provider.command, process.cwd(), argv));
+}
+
+// `ccnav new [name]`: a new folder in the saved projects folder, git init, then `here` in it.
+// Everything that can stop it is asked or checked before the folder is made, so a "no" leaves nothing behind.
+if (args[0] === 'new') {
+  const { CONFIG_FILE, DEFAULT_PROJECTS_DIR, expandDir, gitInit, loadConfig, projectNameProblem, saveConfig } = await import('../src/project.mjs');
+  const fail = message => { console.error(message); process.exit(1); };
+  const rest = args.slice(1);
+  const d = rest.indexOf('--projects-dir');
+  if (d >= 0 && !rest[d + 1]) fail('--projects-dir needs a folder, e.g. ccnav new --projects-dir ~/Projects');
+  const named = AGENTS.find(a => rest.includes(`--${a}`));
+  const others = rest.filter((a, i) => (d < 0 || (i !== d && i !== d + 1)) && a !== '--' && !AGENTS.some(x => a === `--${x}`));
+  // The first bare word is the name; anything else goes to the agent, as with `here`.
+  const nameArg = others[0] && !others[0].startsWith('-') ? others[0] : null;
+  const extra = nameArg ? others.slice(1) : others;
+  const tty = process.stdin.isTTY;
+  let config;
+  try { config = loadConfig(); } catch (error) { fail(error.message); }
+
+  let projectsDir = config.projectsDir;
+  if (d >= 0) {
+    projectsDir = expandDir(rest[d + 1]);
+    saveConfig({ projectsDir });
+    console.log(`Projects folder: ${projectsDir} (saved to ${CONFIG_FILE})`);
+  } else if (!projectsDir) {
+    if (!tty) fail('ccnav new needs a projects folder the first time: ccnav new <name> --projects-dir <path>');
+    const answer = await askUser(`\nWhich folder should ccnav new create projects in? [${shortPath(DEFAULT_PROJECTS_DIR)}] `, { keepCase: true });
+    if (answer === null) fail('\nNo answer given, nothing created.');
+    projectsDir = answer ? expandDir(answer) : DEFAULT_PROJECTS_DIR;
+    saveConfig({ projectsDir });
+    console.log(`Saved to ${CONFIG_FILE}; ccnav new --projects-dir <path> changes it.`);
+  }
+
+  let name = nameArg;
+  if (!name) {
+    // `ccnav new --projects-dir X` on its own only changes the setting.
+    if (d >= 0) process.exit(0);
+    if (!tty) fail('ccnav new needs a project name: ccnav new <name>');
+    name = await askUser(`\nNew project in ${shortPath(projectsDir)}, name: `, { keepCase: true });
+    if (!name) fail('\nNo name given, nothing created.');
+  }
+  const problem = projectNameProblem(name);
+  if (problem) fail(problem);
+  const dir = path.join(projectsDir, name);
+  if (fs.existsSync(dir)) fail(`${dir} already exists, and ccnav new only starts new projects. To work in it: cd there and run ccnav here`);
+
+  const provider = PROVIDERS[named || await chooseAgent(dir, 'ccnav new')];
+  if (!await ensureAgent(provider.command)) process.exit(127);
+
+  try {
+    fs.mkdirSync(projectsDir, { recursive: true });
+    fs.mkdirSync(dir); // not recursive: if it appeared in the meantime, stop rather than share it
+  } catch (error) {
+    fail(error.code === 'EEXIST' ? `${dir} already exists, nothing started` : `could not create ${dir}: ${error.message}`);
+  }
+  const gitProblem = gitInit(dir);
+  console.log(`\nCreated ${dir}${gitProblem ? `; git init skipped: ${gitProblem}` : ' (git repository)'}`);
+  reportCwd(dir);
+  const argv = [...provider.AUTO_ARGS, ...extra];
+  console.log(`\u2192 ${provider.command} ${argv.join(' ')}\n`);
+  process.exit(await launchAgent(provider.command, dir, argv));
 }
 
 // `--since 7d` / `--since 2026-11-01` and `--daily`, shared by refresh and cost.

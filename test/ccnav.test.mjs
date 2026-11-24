@@ -506,6 +506,56 @@ test('`here` carries each agent\'s own unattended flag', async () => {
   assert.ok(!codex.AUTO_ARGS.includes('--full-auto'));
 });
 
+test('`ccnav new` checks the name, and remembers the projects folder', async () => {
+  const { expandDir, gitInit, projectNameProblem } = await import('../src/project.mjs');
+  for (const ok of ['myapp', 'My App', 'app.v2', 'ünïcode']) assert.equal(projectNameProblem(ok), null, ok);
+  for (const bad of ['', '.', '..', 'a/b', 'a\\b', 'c:', 'why?', 'trailing.', 'trailing ', ' leading', 'CON', 'nul.txt', 'com1'])
+    assert.ok(projectNameProblem(bad), bad);
+  assert.equal(expandDir('~'), os.homedir());
+  assert.equal(expandDir('~/Projects'), path.join(os.homedir(), 'Projects'));
+  assert.equal(expandDir('"sub dir"', root), path.join(root, 'sub dir'));
+
+  const { hasCommand } = await import('../src/platform.mjs');
+  if (hasCommand('git')) {
+    const repo = fs.mkdtempSync(path.join(root, 'git-'));
+    assert.equal(gitInit(repo), null);
+    assert.ok(fs.existsSync(path.join(repo, '.git')));
+  }
+});
+
+test('`ccnav new` creates nothing until it can start, and never reuses a folder', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const bin = fileURLToPath(new URL('../bin/ccnav.mjs', import.meta.url));
+  const home = path.join(root, 'ccnav-new-home');
+  const projects = path.join(root, 'projects');
+  const run = (...a) => spawnSync(process.execPath, [bin, 'new', ...a], { encoding: 'utf8', input: '', env: { ...process.env, CCNAV_HOME: home } });
+
+  let r = run('demo');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /needs a projects folder/);
+
+  // On its own, --projects-dir only saves the setting.
+  r = run('--projects-dir', projects);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8')).projectsDir, projects);
+
+  // No terminal to ask which agent: it stops before making the folder.
+  r = run('demo');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /ccnav new needs an interactive terminal/);
+  assert.ok(!fs.existsSync(path.join(projects, 'demo')));
+
+  fs.mkdirSync(path.join(projects, 'taken'), { recursive: true });
+  r = run('taken', '--claude');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /already exists/);
+
+  r = run('bad/name', '--claude');
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /cannot contain/);
+});
+
 test('`ccnav here` starts nothing when there is no terminal and no named agent', async () => {
   const { spawnSync } = await import('node:child_process');
   const { fileURLToPath } = await import('node:url');
